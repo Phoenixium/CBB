@@ -1,0 +1,32 @@
+## .NET / C# ##
+bin/
+obj/
+*.user
+*.suo
+*.vs/
+.vs/
+
+## Build output ##
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+
+## NuGet ##
+*.nupkg
+packages/
+!**/packages/build/
+project.lock.json
+project.fragment.lock.json
+packages.lock.json
+artifacts/
+directory.build.*
+
+## Rider ##
+.idea/
+
+## Env ##
+.env
+.vscode
+*.lnk
+docs/

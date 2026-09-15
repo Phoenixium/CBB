@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/deps/" />
+  <Folder Name="/deps/Ocelot/">
+    <Project Path="deps/Ocelot/Ocelot.Chain/Ocelot.Chain.csproj" />
+    <Project Path="deps/Ocelot/Ocelot.ECommons/Ocelot.ECommons.csproj" />
+    <Project Path="deps/Ocelot/Ocelot.Mechanic/Ocelot.Mechanic.csproj" />
+    <Project Path="deps/Ocelot/Ocelot.Pathfinding/Ocelot.Pathfinding.csproj" />
+    <Project Path="deps/Ocelot/Ocelot.Pictomancy/Ocelot.Pictomancy.csproj" />
+    <Project Path="deps/Ocelot/Ocelot.Rotation/Ocelot.Rotation.csproj" />
+    <Project Path="deps/Ocelot/Ocelot.UI/Ocelot.UI.csproj" />
+    <Project Path="deps/Ocelot/Ocelot/Ocelot.csproj" />
+  </Folder>
+  <Project Path="Botja/Botja.csproj" />
+</Solution>

@@ -1,0 +1,384 @@
+using Dalamud.Plugin.Services;
+using ECommons.Automation;
+using FFXIVClientStructs.FFXIV.Client.UI;
+using FFXIVClientStructs.FFXIV.Component.GUI;
+using Ocelot.Lifecycle;
+using System;
+
+namespace Botja.Services;
+
+public unsafe partial class GuiInteractionService(IGameGui gameGui, IAddonLifecycle addonLifecycle, ItemInspectionConfig itemInspectionConfig, IPluginLog log) : IOnUpdate
+{
+    private static readonly TimeSpan AutomationActionDelay = TimeSpan.FromMilliseconds(300);
+        private static readonly TimeSpan AutomationPhaseTimeout = TimeSpan.FromMinutes(10);
+
+    private enum ItemInspectionAutomationPhase
+    {
+        Idle,
+        SelectRow,
+        ClickRow,
+        WaitForYesNo,
+        WaitForResult,
+        AdvanceResult,
+        WaitForList,
+    }
+
+    private ItemInspectionAutomationPhase automationPhase;
+    private int automationRowIndex;
+    private int automationListLength;
+    private int automationProcessedItems;
+    private int automationItemQuantity;
+    private int automationItemNextClicksRemaining;
+    private int automationTicks;
+    private DateTime automationNextActionAt;
+    private DateTime automationPhaseStartedAt;
+    private string automationStatus = "Idle";
+
+    public string ItemInspectionAutomationStatus => automationStatus;
+
+    public void StartItemInspectionAutomation()
+    {
+        var list = GetItemInspectionList();
+        if (list == null)
+        {
+            automationStatus = "Cannot start: ItemInspectionList is not open.";
+            log.Debug("[GuiInteract] {Status}", automationStatus);
+            return;
+        }
+
+        automationRowIndex = 0;
+        automationListLength = list->ListLength;
+    automationProcessedItems = 0;
+        automationItemQuantity = 0;
+        automationItemNextClicksRemaining = 0;
+        automationTicks = 0;
+        automationNextActionAt = DateTime.MinValue;
+        automationPhaseStartedAt = DateTime.UtcNow;
+        automationPhase = ItemInspectionAutomationPhase.SelectRow;
+        automationStatus = $"Running: 0/{automationListLength}";
+        log.Debug("[GuiInteract] ItemInspection automation started, listLength={ListLength}", automationListLength);
+    }
+
+    public void StopItemInspectionAutomation()
+    {
+        if (automationPhase != ItemInspectionAutomationPhase.Idle)
+            log.Debug("[GuiInteract] ItemInspection automation stopped at phase={Phase} row={Row}/{Length}", automationPhase, automationRowIndex, automationListLength);
+
+        automationPhase = ItemInspectionAutomationPhase.Idle;
+    automationProcessedItems = 0;
+        automationItemQuantity = 0;
+        automationItemNextClicksRemaining = 0;
+        automationTicks = 0;
+        automationNextActionAt = DateTime.MinValue;
+        automationPhaseStartedAt = DateTime.MinValue;
+        automationStatus = "Stopped";
+    }
+
+    public void Update()
+    {
+        if (automationPhase == ItemInspectionAutomationPhase.Idle)
+            return;
+
+        automationTicks++;
+        if (DateTime.UtcNow < automationNextActionAt)
+            return;
+
+        var phaseElapsed = DateTime.UtcNow - automationPhaseStartedAt;
+        if (phaseElapsed > AutomationPhaseTimeout)
+        {
+            automationStatus = $"Stopped: timeout in {automationPhase} at row {automationRowIndex} after {phaseElapsed.TotalSeconds:F1}s ({automationTicks} ticks)";
+            log.Debug("[GuiInteract] {Status}", automationStatus);
+            StopItemInspectionAutomation();
+            return;
+        }
+
+        switch (automationPhase)
+        {
+            case ItemInspectionAutomationPhase.SelectRow:
+                var list = GetItemInspectionList();
+                if (list == null)
+                {
+                    automationStatus = "Stopped: ItemInspectionList is not open.";
+                    StopItemInspectionAutomation();
+                    return;
+                }
+
+                automationListLength = list->ListLength;
+                if (automationListLength <= 0)
+                {
+                    automationStatus = $"Done: processed {automationProcessedItems} items";
+                    automationPhase = ItemInspectionAutomationPhase.Idle;
+                    log.Debug("[GuiInteract] {Status}", automationStatus);
+                    return;
+                }
+
+                automationRowIndex = FindFirstProcessableItemInspectionRow(list);
+                if (automationRowIndex < 0)
+                {
+                    automationStatus = $"Done: processed {automationProcessedItems} items; {automationListLength} skipped";
+                    automationPhase = ItemInspectionAutomationPhase.Idle;
+                    log.Debug("[GuiInteract] {Status}", automationStatus);
+                    return;
+                }
+
+                automationItemQuantity = GetItemInspectionListRowQuantity(automationRowIndex) ?? 1;
+                automationItemNextClicksRemaining = automationItemQuantity;
+                if (!SelectItemInspectionListRow(automationRowIndex, true))
+                {
+                    automationStatus = $"Stopped: cannot select row {automationRowIndex}";
+                    StopItemInspectionAutomation();
+                    return;
+                }
+
+                SetAutomationPhase(ItemInspectionAutomationPhase.ClickRow);
+                return;
+
+            case ItemInspectionAutomationPhase.ClickRow:
+                if (!ClickItemInspectionListRow(automationRowIndex))
+                {
+                    automationStatus = $"Stopped: cannot click row {automationRowIndex}";
+                    StopItemInspectionAutomation();
+                    return;
+                }
+
+                SetAutomationPhase(ItemInspectionAutomationPhase.WaitForYesNo);
+                return;
+
+            case ItemInspectionAutomationPhase.WaitForYesNo:
+                if (IsAddonVisible("SelectYesno"))
+                {
+                    ClickSelectYesnoYes();
+                    SetAutomationPhase(ItemInspectionAutomationPhase.WaitForResult);
+                }
+                return;
+
+            case ItemInspectionAutomationPhase.WaitForResult:
+                if (IsAddonVisible("ItemInspectionResult"))
+                    SetAutomationPhase(ItemInspectionAutomationPhase.AdvanceResult);
+                return;
+
+            case ItemInspectionAutomationPhase.AdvanceResult:
+                if (!IsAddonVisible("ItemInspectionResult"))
+                {
+                    if (automationItemNextClicksRemaining > 0)
+                    {
+                        automationStatus = $"Running: waiting for result, {automationItemNextClicksRemaining} item clicks remaining";
+                        SetAutomationPhase(ItemInspectionAutomationPhase.WaitForResult);
+                        return;
+                    }
+
+                    automationProcessedItems++;
+                    SetAutomationPhase(ItemInspectionAutomationPhase.WaitForList);
+                    return;
+                }
+
+                if (automationItemNextClicksRemaining <= 0)
+                {
+                    ClickItemInspectionResultClose();
+                    automationProcessedItems++;
+                    SetAutomationPhase(ItemInspectionAutomationPhase.WaitForList);
+                    return;
+                }
+
+                if (!ClickItemInspectionResultNext())
+                {
+                    automationStatus = $"Stopped: cannot click Next for row {automationRowIndex}";
+                    StopItemInspectionAutomation();
+                    return;
+                }
+
+                automationItemNextClicksRemaining--;
+                automationStatus = $"Running: processed {automationProcessedItems}, remaining {automationListLength}, item click {automationItemQuantity - automationItemNextClicksRemaining}/{automationItemQuantity}";
+                automationNextActionAt = DateTime.UtcNow + AutomationActionDelay;
+                return;
+
+            case ItemInspectionAutomationPhase.WaitForList:
+                if (IsAddonVisible("ItemInspectionList"))
+                    SetAutomationPhase(ItemInspectionAutomationPhase.SelectRow);
+                return;
+        }
+    }
+
+    private void SetAutomationPhase(ItemInspectionAutomationPhase nextPhase)
+    {
+        automationPhase = nextPhase;
+        automationTicks = 0;
+        automationNextActionAt = DateTime.UtcNow + AutomationActionDelay;
+        automationPhaseStartedAt = DateTime.UtcNow;
+        automationStatus = $"Running: processed {automationProcessedItems}, remaining {automationListLength}, phase={automationPhase}, item={automationItemQuantity - automationItemNextClicksRemaining}/{automationItemQuantity}";
+    }
+
+    // Clicks "Yes" (button index 0) on the SelectYesno addon if it is currently open.
+    public bool ClickSelectYesnoYes()
+    {
+        var addon = (AddonSelectYesno*)gameGui.GetAddonByName("SelectYesno").Address;
+        if (addon == null || !addon->AtkUnitBase.IsVisible)
+        {
+            log.Debug("[GuiInteract] SelectYesno not open, nothing to click");
+            return false;
+        }
+
+        log.Debug("[GuiInteract] Clicking Yes on SelectYesno at 0x{Address:X}", (nint)addon);
+        Callback.Fire(&addon->AtkUnitBase, true, 0);
+        return true;
+    }
+
+
+    // Generic version for addons without a dedicated FFXIVClientStructs struct handy (e.g.
+    // ItemInspectionList/ItemInspectionResult) — lets us try different callback values live instead
+    // of guessing blind. updateState/values meaning is addon-specific; 0 is the common "confirm" index.
+    public bool FireAddonCallback(string addonName, bool updateState, params object[] values)
+    {
+        var addon = (AtkUnitBase*)gameGui.GetAddonByName(addonName).Address;
+        if (addon == null || !addon->IsVisible)
+        {
+            log.Debug("[GuiInteract] {AddonName} not open, nothing to fire", addonName);
+            return false;
+        }
+
+        log.Debug("[GuiInteract] Firing callback on {AddonName} at 0x{Address:X} with values [{Values}]", addonName, (nint)addon, string.Join(", ", values));
+        Callback.Fire(addon, updateState, values);
+        return true;
+    }
+
+    // Advances to the next item in the ItemInspectionResult popup (left "Next" button, index 0).
+    public bool ClickItemInspectionResultNext() => FireAddonCallback("ItemInspectionResult", true, 0);
+
+    // Closes the ItemInspectionResult popup (right "Close" button, index 1).
+    public bool ClickItemInspectionResultClose() => FireAddonCallback("ItemInspectionResult", true, 1);
+
+    public bool SelectItemInspectionListRow(int rowIndex, bool dispatchEvent)
+    {
+        var addon = (AddonItemInspectionList*)gameGui.GetAddonByName("ItemInspectionList").Address;
+        if (addon == null || !addon->AtkUnitBase.IsVisible)
+        {
+            log.Debug("[GuiInteract] ItemInspectionList not open, cannot select row {RowIndex}", rowIndex);
+            return false;
+        }
+
+        var list = addon->GetComponentListById(7);
+        if (list == null)
+        {
+            log.Debug("[GuiInteract] ItemInspectionList list component 7 not found");
+            return false;
+        }
+
+        log.Debug("[GuiInteract] ItemInspectionList SelectItem({RowIndex}, {DispatchEvent}) listLength={ListLength} firstVisible={FirstVisible} selected={Selected}",
+            rowIndex, dispatchEvent, list->ListLength, list->FirstVisibleItemIndex, list->SelectedItemIndex);
+        list->SelectItem(rowIndex, dispatchEvent);
+        return true;
+    }
+
+    public int? GetItemInspectionListRowQuantity(int rowIndex)
+    {
+        var list = GetItemInspectionList();
+        if (list == null)
+            return null;
+
+        var renderer = FindItemInspectionListRenderer(list, rowIndex);
+        var textNode = renderer != null ? renderer->GetTextNodeById(5) : null;
+        if (textNode == null)
+            return null;
+
+        return ParseFirstInteger(textNode->NodeText.ToString());
+    }
+
+    private static int? ParseFirstInteger(string value)
+    {
+        int result = 0;
+        bool found = false;
+        foreach (char character in value)
+        {
+            if (!char.IsDigit(character))
+            {
+                if (found)
+                    break;
+                continue;
+            }
+
+            found = true;
+            result = (result * 10) + (character - '0');
+        }
+
+        return found ? result : null;
+    }
+
+    private int FindFirstProcessableItemInspectionRow(AtkComponentList* list)
+    {
+        for (int itemId = list->ListLength - 1; itemId >= 0; itemId--)
+        {
+            if (!ShouldSkipItemInspectionItem(itemId))
+                return itemId;
+        }
+
+        return -1;
+    }
+
+    private bool ShouldSkipItemInspectionItem(int itemId) => itemInspectionConfig.SkipItemIds.Contains(itemId);
+
+    public bool ClickItemInspectionListRow(int rowIndex)
+    {
+        var addon = (AddonItemInspectionList*)gameGui.GetAddonByName("ItemInspectionList").Address;
+        if (addon == null || !addon->AtkUnitBase.IsVisible)
+        {
+            log.Debug("[GuiInteract] ItemInspectionList not open, cannot click row {RowIndex}", rowIndex);
+            return false;
+        }
+
+        var list = addon->GetComponentListById(7);
+        if (list == null)
+        {
+            log.Debug("[GuiInteract] ItemInspectionList list component 7 not found");
+            return false;
+        }
+
+        var renderer = FindItemInspectionListRenderer(list, rowIndex);
+        if (renderer == null)
+        {
+            log.Debug("[GuiInteract] ItemInspectionList renderer for row {RowIndex} not found", rowIndex);
+            return false;
+        }
+
+        var eventData = new AtkEventData();
+        eventData.ListItemData.ListItemRenderer = renderer;
+        eventData.ListItemData.SelectedIndex = rowIndex;
+        eventData.ListItemData.MouseButtonId = 0;
+
+        var atkEvent = new AtkEvent();
+        atkEvent.Node = renderer->AtkResNode;
+        atkEvent.Listener = (AtkEventListener*)addon;
+        atkEvent.Param = 0;
+
+        log.Debug("[GuiInteract] ItemInspectionList ReceiveEvent(ListItemClick, row={RowIndex}, node={NodeId})", rowIndex, renderer->AtkResNode->NodeId);
+        addon->ReceiveEvent(AtkEventType.ListItemClick, 0, &atkEvent, &eventData);
+        return true;
+    }
+
+    private static AtkComponentListItemRenderer* FindItemInspectionListRenderer(AtkComponentList* list, int rowIndex)
+    {
+        for (int i = 0; i < list->UldManager.NodeListCount; i++)
+        {
+            var componentNode = list->UldManager.NodeList[i]->GetAsAtkComponentNode();
+            var renderer = componentNode != null ? componentNode->GetAsAtkComponentListItemRenderer() : null;
+            if (renderer != null && renderer->ListItemIndex == rowIndex)
+                return renderer;
+        }
+
+        return null;
+    }
+
+    private bool IsAddonVisible(string addonName)
+    {
+        var addon = (AtkUnitBase*)gameGui.GetAddonByName(addonName).Address;
+        return addon != null && addon->IsVisible;
+    }
+
+    private AtkComponentList* GetItemInspectionList()
+    {
+        var addon = (AddonItemInspectionList*)gameGui.GetAddonByName("ItemInspectionList").Address;
+        if (addon == null || !addon->AtkUnitBase.IsVisible)
+            return null;
+
+        return addon->GetComponentListById(7);
+    }
+}

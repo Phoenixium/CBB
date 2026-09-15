@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+  <PropertyGroup>
+    <Version>0.0.0.1</Version>
+    <Author>your name here</Author>
+    <Name>Botja</Name>
+    <Punchline>A short one-liner that shows up in /xlplugins.</Punchline>
+    <Description>A brief overview of what Botja does.</Description>
+    <RepoUrl>https://github.com/yourusername/Botja</RepoUrl>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\deps\Ocelot\Ocelot\Ocelot.csproj" />
+    <ProjectReference Include="..\deps\Ocelot\Ocelot.UI\Ocelot.UI.csproj" />
+    <ProjectReference Include="..\deps\Ocelot\Ocelot.ECommons\Ocelot.ECommons.csproj" />
+    <ProjectReference Include="..\deps\Ocelot\Ocelot.Chain\Ocelot.Chain.csproj" />
+    <ProjectReference Include="..\deps\Ocelot\Ocelot.Mechanic\Ocelot.Mechanic.csproj" />
+    <ProjectReference Include="..\deps\Ocelot\Ocelot.Pathfinding\Ocelot.Pathfinding.csproj" />
+    <ProjectReference Include="..\deps\Ocelot\Ocelot.Rotation\Ocelot.Rotation.csproj" />
+    <ProjectReference Include="..\deps\Ocelot\Ocelot.Pictomancy\Ocelot.Pictomancy.csproj" />
+  </ItemGroup>
+</Project>
