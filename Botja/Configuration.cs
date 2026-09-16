@@ -1,6 +1,7 @@
 using Dalamud.Configuration;
 using Ocelot.Config;
 using Ocelot.Config.Fields;
+using Botja.Windows;
 using System.Collections.Generic;
 
 namespace Botja;
@@ -88,9 +89,11 @@ public sealed class CombatConfig : IAutoConfig
 // Fate/CE template IDs (not per-instance runtime IDs) the player never wants Auto Mode to pick.
 public sealed class BlacklistConfig : IAutoConfig
 {
-    public HashSet<uint> FateIds { get; set; } = [];
+    [BlacklistChecklist(false)]
+    public List<uint> FateIds { get; set; } = [];
 
-    public HashSet<uint> CeEventIds { get; set; } = [];
+    [BlacklistChecklist(true)]
+    public List<uint> CeEventIds { get; set; } = [];
 }
 
 

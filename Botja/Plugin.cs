@@ -1,7 +1,9 @@
 using System.Linq;
 using Botja.Services;
+using Botja.Windows;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
+using Ocelot.Lifecycle;
 using Microsoft.Extensions.DependencyInjection;
 using Ocelot;
 using Ocelot.Config;
@@ -33,6 +35,9 @@ public sealed class Plugin(IDalamudPluginInterface pluginInterface, IPluginLog l
         services.AddSingleton<IConfigRenderer, ConfigRenderer>();
         services.AddSingleton(typeof(GenericDisplay<>));
         services.AddSingleton(typeof(NoOpFilter<>));
+        services.AddSingleton(typeof(Ocelot.Config.Renderers.Excel.GenericDisplay<>));
+        services.AddSingleton(typeof(Ocelot.Config.Renderers.Excel.NoOpFilter<>));
+        services.AddSingleton<BlacklistChecklistRenderer>();
         services.LoadPictomancy();
         services.LoadRotations();
         services.AddSingleton<FateNavigationService>();
@@ -41,6 +46,7 @@ public sealed class Plugin(IDalamudPluginInterface pluginInterface, IPluginLog l
         services.AddSingleton<CeSignupService>();
         services.AddSingleton<CombatControlService>();
         services.AddSingleton<AutoModeService>();
+        services.AddSingleton<TranslationLoader>();
         services.AddSingleton<Windows.FateListWindow>();
         // Registering as IMainWindow (not IWindow) so it replaces Ocelot's default empty main window.
         services.AddSingleton<IMainWindow>(sp => sp.GetRequiredService<Windows.FateListWindow>());

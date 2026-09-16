@@ -135,7 +135,7 @@ public sealed class AutoModeService(
             return;
         }
 
-        var top = fatePriority.GetSortedFates(fateTable).FirstOrDefault();
+        var top = fatePriority.GetAutoSelectableFates(fateTable).FirstOrDefault();
         if (top == null)
         {
             Status = "No FATEs or CEs available; waiting.";

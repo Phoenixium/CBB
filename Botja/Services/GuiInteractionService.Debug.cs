@@ -115,6 +115,145 @@ public unsafe partial class GuiInteractionService
             itemInspectionEvents.RemoveAt(0);
     }
 
+    // Generic version of the ItemInspectionList row dump/select/click helpers — works on any addon
+    // with an AtkComponentList by node ID (e.g. SkyIslandExchange2's list is node 13, not 7).
+    public string DumpAddonListRows(string addonName, uint listNodeId)
+    {
+        var addon = (AtkUnitBase*)gameGui.GetAddonByName(addonName).Address;
+        if (addon == null)
+            return $"{addonName}: not found (not currently open)";
+
+        var list = FindComponentList(addon, listNodeId);
+        if (list == null)
+            return $"{addonName}: list node {listNodeId} not found (or not a List component)";
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"{addonName}  ID={addon->Id}  Visible={addon->IsVisible}  ListNode={listNodeId}");
+        sb.AppendLine($"List: Length={list->ListLength} FirstVisible={list->FirstVisibleItemIndex} Selected={list->SelectedItemIndex} Hovered={list->HoveredItemIndex} VisibleRows={list->VisibleRowCount} NumVisibleItems={list->NumVisibleItems}");
+
+        for (int i = 0; i < list->UldManager.NodeListCount; i++)
+        {
+            var componentNode = list->UldManager.NodeList[i]->GetAsAtkComponentNode();
+            var renderer = componentNode != null ? componentNode->GetAsAtkComponentListItemRenderer() : null;
+            if (renderer == null || !componentNode->AtkResNode.IsVisible())
+                continue;
+
+            sb.AppendLine($"RowComponent NodeId={componentNode->AtkResNode.NodeId} ListItemIndex={renderer->ListItemIndex} Pos=({componentNode->AtkResNode.X:F0},{componentNode->AtkResNode.Y:F0}) Size=({componentNode->AtkResNode.Width}x{componentNode->AtkResNode.Height})");
+            for (int textNodeId = 1; textNodeId <= 12; textNodeId++)
+            {
+                var textNode = renderer->GetTextNodeById((uint)textNodeId);
+                if (textNode == null || !textNode->AtkResNode.IsVisible())
+                    continue;
+
+                sb.AppendLine($"  TextNode {textNodeId}: \"{textNode->NodeText}\"");
+            }
+        }
+
+        return sb.ToString();
+    }
+
+    // Reads the current row count without selecting/clicking anything — used to detect "no rows
+    // left" before an automation loop tries to select/click a row that no longer exists.
+    public int? GetAddonListLength(string addonName, uint listNodeId)
+    {
+        var addon = (AtkUnitBase*)gameGui.GetAddonByName(addonName).Address;
+        if (addon == null || !addon->IsVisible)
+            return null;
+
+        var list = FindComponentList(addon, listNodeId);
+        return list == null ? null : list->ListLength;
+    }
+
+    public bool SelectAddonListRow(string addonName, uint listNodeId, int rowIndex, bool dispatchEvent)
+    {
+        var addon = (AtkUnitBase*)gameGui.GetAddonByName(addonName).Address;
+        if (addon == null || !addon->IsVisible)
+        {
+            log.Debug("[GuiInteract] {AddonName} not open, cannot select row {RowIndex}", addonName, rowIndex);
+            return false;
+        }
+
+        var list = FindComponentList(addon, listNodeId);
+        if (list == null)
+        {
+            log.Debug("[GuiInteract] {AddonName} list node {ListNodeId} not found", addonName, listNodeId);
+            return false;
+        }
+
+        log.Debug("[GuiInteract] {AddonName} SelectItem({RowIndex}, {DispatchEvent}) listLength={ListLength} selected={Selected}",
+            addonName, rowIndex, dispatchEvent, list->ListLength, list->SelectedItemIndex);
+        list->SelectItem(rowIndex, dispatchEvent);
+        return true;
+    }
+
+    public bool ClickAddonListRow(string addonName, uint listNodeId, int rowIndex)
+    {
+        var addon = (AtkUnitBase*)gameGui.GetAddonByName(addonName).Address;
+        if (addon == null || !addon->IsVisible)
+        {
+            log.Debug("[GuiInteract] {AddonName} not open, cannot click row {RowIndex}", addonName, rowIndex);
+            return false;
+        }
+
+        var list = FindComponentList(addon, listNodeId);
+        if (list == null)
+        {
+            log.Debug("[GuiInteract] {AddonName} list node {ListNodeId} not found", addonName, listNodeId);
+            return false;
+        }
+
+        var renderer = FindListItemRenderer(list, rowIndex);
+        if (renderer == null)
+        {
+            log.Debug("[GuiInteract] {AddonName} renderer for row {RowIndex} not found", addonName, rowIndex);
+            return false;
+        }
+
+        var eventData = new AtkEventData();
+        eventData.ListItemData.ListItemRenderer = renderer;
+        eventData.ListItemData.SelectedIndex = rowIndex;
+        eventData.ListItemData.MouseButtonId = 0;
+
+        var atkEvent = new AtkEvent();
+        atkEvent.Node = renderer->AtkResNode;
+        atkEvent.Listener = (AtkEventListener*)addon;
+        atkEvent.Param = 0;
+
+        log.Debug("[GuiInteract] {AddonName} ReceiveEvent(ListItemClick, row={RowIndex}, node={NodeId})", addonName, rowIndex, renderer->AtkResNode->NodeId);
+        addon->ReceiveEvent(AtkEventType.ListItemClick, 0, &atkEvent, &eventData);
+        return true;
+    }
+
+    private static AtkComponentList* FindComponentList(AtkUnitBase* addon, uint listNodeId)
+    {
+        for (int i = 0; i < addon->UldManager.NodeListCount; i++)
+        {
+            var node = addon->UldManager.NodeList[i];
+            if (node == null || node->NodeId != listNodeId)
+                continue;
+
+            var componentNode = node->GetAsAtkComponentNode();
+            var component = componentNode != null ? componentNode->GetComponent() : null;
+            if (component != null && component->GetComponentType() == ComponentType.List)
+                return (AtkComponentList*)component;
+        }
+
+        return null;
+    }
+
+    private static AtkComponentListItemRenderer* FindListItemRenderer(AtkComponentList* list, int rowIndex)
+    {
+        for (int i = 0; i < list->UldManager.NodeListCount; i++)
+        {
+            var componentNode = list->UldManager.NodeList[i]->GetAsAtkComponentNode();
+            var renderer = componentNode != null ? componentNode->GetAsAtkComponentListItemRenderer() : null;
+            if (renderer != null && renderer->ListItemIndex == rowIndex)
+                return renderer;
+        }
+
+        return null;
+    }
+
     public string DebugAddonInfo(string addonName)
     {
         var addon = (AtkUnitBase*)gameGui.GetAddonByName(addonName).Address;

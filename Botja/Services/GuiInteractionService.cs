@@ -76,6 +76,12 @@ public unsafe partial class GuiInteractionService(IGameGui gameGui, IAddonLifecy
 
     public void Update()
     {
+        UpdateItemInspectionAutomation();
+        UpdateGenericListAutomation();
+    }
+
+    private void UpdateItemInspectionAutomation()
+    {
         if (automationPhase == ItemInspectionAutomationPhase.Idle)
             return;
 
@@ -206,6 +212,131 @@ public unsafe partial class GuiInteractionService(IGameGui gameGui, IAddonLifecy
         automationNextActionAt = DateTime.UtcNow + AutomationActionDelay;
         automationPhaseStartedAt = DateTime.UtcNow;
         automationStatus = $"Running: processed {automationProcessedItems}, remaining {automationListLength}, phase={automationPhase}, item={automationItemQuantity - automationItemNextClicksRemaining}/{automationItemQuantity}";
+    }
+
+    // Generic "click row 0, then confirm SelectYesno" loop — for addons like SkyIslandExchange2 where
+    // each accepted row just needs a Yes confirmation, unlike ItemInspectionList's quantity/Next flow.
+    private enum GenericListAutomationPhase
+    {
+        Idle,
+        ClickRow,
+        WaitForYesNo,
+        WaitForList,
+    }
+
+    private GenericListAutomationPhase genericListPhase;
+    private string genericListAddonName = "";
+    private uint genericListNodeId;
+    private int genericListProcessedRows;
+    private int genericListTicks;
+    private DateTime genericListNextActionAt;
+    private DateTime genericListPhaseStartedAt;
+    private string genericListStatus = "Idle";
+
+    public string GenericListAutomationStatus => genericListStatus;
+
+    public void StartGenericListAutomation(string addonName, uint listNodeId)
+    {
+        genericListAddonName = addonName;
+        genericListNodeId = listNodeId;
+        genericListProcessedRows = 0;
+        genericListTicks = 0;
+        genericListNextActionAt = DateTime.MinValue;
+        genericListPhaseStartedAt = DateTime.UtcNow;
+        genericListPhase = GenericListAutomationPhase.ClickRow;
+        genericListStatus = $"Running: {addonName} list {listNodeId}";
+        log.Debug("[GuiInteract] Generic list automation started for {AddonName} node {ListNodeId}", addonName, listNodeId);
+    }
+
+    public void StopGenericListAutomation()
+    {
+        if (genericListPhase != GenericListAutomationPhase.Idle)
+            log.Debug("[GuiInteract] Generic list automation stopped at phase={Phase} processed={Processed}", genericListPhase, genericListProcessedRows);
+
+        genericListPhase = GenericListAutomationPhase.Idle;
+        genericListTicks = 0;
+        genericListNextActionAt = DateTime.MinValue;
+        genericListStatus = "Stopped";
+    }
+
+    private void UpdateGenericListAutomation()
+    {
+        if (genericListPhase == GenericListAutomationPhase.Idle)
+            return;
+
+        genericListTicks++;
+        if (DateTime.UtcNow < genericListNextActionAt)
+            return;
+
+        var phaseElapsed = DateTime.UtcNow - genericListPhaseStartedAt;
+        if (phaseElapsed > AutomationPhaseTimeout)
+        {
+            genericListStatus = $"Stopped: timeout in {genericListPhase} after {phaseElapsed.TotalSeconds:F1}s ({genericListTicks} ticks)";
+            log.Debug("[GuiInteract] {Status}", genericListStatus);
+            StopGenericListAutomation();
+            return;
+        }
+
+        switch (genericListPhase)
+        {
+            case GenericListAutomationPhase.ClickRow:
+                if (!IsAddonVisible(genericListAddonName))
+                {
+                    genericListStatus = $"Done: {genericListAddonName} closed, processed {genericListProcessedRows} rows";
+                    genericListPhase = GenericListAutomationPhase.Idle;
+                    log.Debug("[GuiInteract] {Status}", genericListStatus);
+                    return;
+                }
+
+                int? remainingRows = GetAddonListLength(genericListAddonName, genericListNodeId);
+                if (remainingRows is null or <= 0)
+                {
+                    genericListStatus = $"Done: {genericListAddonName} has no more rows, processed {genericListProcessedRows}";
+                    genericListPhase = GenericListAutomationPhase.Idle;
+                    log.Debug("[GuiInteract] {Status}", genericListStatus);
+                    return;
+                }
+
+                if (!SelectAddonListRow(genericListAddonName, genericListNodeId, 0, true))
+                {
+                    genericListStatus = $"Stopped: cannot select row 0 in {genericListAddonName}";
+                    StopGenericListAutomation();
+                    return;
+                }
+
+                if (!ClickAddonListRow(genericListAddonName, genericListNodeId, 0))
+                {
+                    genericListStatus = $"Stopped: cannot click row 0 in {genericListAddonName}";
+                    StopGenericListAutomation();
+                    return;
+                }
+
+                SetGenericListPhase(GenericListAutomationPhase.WaitForYesNo);
+                return;
+
+            case GenericListAutomationPhase.WaitForYesNo:
+                if (IsAddonVisible("SelectYesno"))
+                {
+                    ClickSelectYesnoYes();
+                    genericListProcessedRows++;
+                    SetGenericListPhase(GenericListAutomationPhase.WaitForList);
+                }
+                return;
+
+            case GenericListAutomationPhase.WaitForList:
+                if (IsAddonVisible(genericListAddonName))
+                    SetGenericListPhase(GenericListAutomationPhase.ClickRow);
+                return;
+        }
+    }
+
+    private void SetGenericListPhase(GenericListAutomationPhase nextPhase)
+    {
+        genericListPhase = nextPhase;
+        genericListTicks = 0;
+        genericListNextActionAt = DateTime.UtcNow + AutomationActionDelay;
+        genericListPhaseStartedAt = DateTime.UtcNow;
+        genericListStatus = $"Running: {genericListAddonName}, processed {genericListProcessedRows}, phase={genericListPhase}";
     }
 
     // Clicks "Yes" (button index 0) on the SelectYesno addon if it is currently open.

@@ -64,7 +64,7 @@ public partial class FateListWindow(
         {
             using (ImRaii.Disabled(fateTable.Length == 0))
             {
-                if (ImGui.Button($"{FontAwesomeIcon.Star.ToIconString()}##topfate") && fatePriority.GetSortedFates(fateTable).FirstOrDefault() is { } top)
+                if (ImGui.Button($"{FontAwesomeIcon.Star.ToIconString()}##topfate") && fatePriority.GetAutoSelectableFates(fateTable).FirstOrDefault() is { } top)
                 {
                     combatControl.SetActiveFate(top.FateId);
                     nav.AutoNavigate(top.Position, top.Name.ToString());
@@ -73,19 +73,26 @@ public partial class FateListWindow(
         }
 
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Auto-navigate to the top-priority FATE");
+            ImGui.SetTooltip("Auto-navigate to the highest-priority FATE");
 
         ImGui.Separator();
 
-        ImGui.TextUnformatted("Item inspection:");
-        if (ImGui.Button("Start ItemInspection loop"))
+        ImGui.TextUnformatted("Appraising:");
+        if (ImGui.Button("Start appraising"))
             guiInteract.StartItemInspectionAutomation();
         ImGui.SameLine();
-        if (ImGui.Button("STOP ItemInspection loop"))
+        if (ImGui.Button("Stop appraising"))
             guiInteract.StopItemInspectionAutomation();
         ImGui.TextUnformatted(guiInteract.ItemInspectionAutomationStatus);
 
-        if (ImGui.Button(ceSignup.IsRunning ? "Stop CE signup" : "Join recruiting CE"))
+        if (ImGui.Button("Start field note exchange"))
+            guiInteract.StartGenericListAutomation("SkyIslandExchange2", 13);
+        ImGui.SameLine();
+        if (ImGui.Button("Stop field note exchange"))
+            guiInteract.StopGenericListAutomation();
+        ImGui.TextUnformatted(guiInteract.GenericListAutomationStatus);
+
+        if (ImGui.Button(ceSignup.IsRunning ? "Stop joining critical engagements" : "Join a recruiting critical engagement"))
         {
             if (ceSignup.IsRunning)
                 ceSignup.Stop();
@@ -97,20 +104,20 @@ public partial class FateListWindow(
 
         if (ceSignup.TryFindRecruitingEvent(out var recruitingCeId))
         {
-            ImGui.TextUnformatted($"Recruiting CE: {ceSignup.GetCeName(recruitingCeId)} (ID {recruitingCeId})");
+            ImGui.TextUnformatted($"Recruiting critical engagement: {ceSignup.GetCeName(recruitingCeId)} (ID {recruitingCeId})");
             ImGui.SameLine();
             using (ImRaii.Disabled(ceSignup.IsCeBlacklisted(recruitingCeId)))
             {
-                if (ImGui.Button("Blacklist this CE##ceblacklist"))
+                if (ImGui.Button("Ignore this critical engagement##ceblacklist"))
                     ceSignup.BlacklistCe(recruitingCeId);
             }
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Never auto-join this CE again");
+                ImGui.SetTooltip("Do not join this critical engagement automatically again");
         }
 
         ImGui.Separator();
 
-        if (ImGui.Button(autoMode.IsRunning ? "Stop Auto Mode" : "Start Auto Mode"))
+        if (ImGui.Button(autoMode.IsRunning ? "Stop automatic mode" : "Start automatic mode"))
         {
             if (autoMode.IsRunning)
                 autoMode.Stop();
@@ -118,11 +125,11 @@ public partial class FateListWindow(
                 autoMode.Start();
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Continuously travel to and fight the next FATE, joining recruiting CEs first");
+            ImGui.SetTooltip("Travel to and fight the next FATE automatically, joining recruiting critical engagements first");
         ImGui.TextUnformatted(autoMode.Status);
 
         if (nav.DebugPhase != "None" && !string.IsNullOrEmpty(nav.DebugPendingDestinationName))
-            ImGui.TextUnformatted($"Going to fate: {nav.DebugPendingDestinationName}");
+            ImGui.TextUnformatted($"Travelling to FATE: {nav.DebugPendingDestinationName}");
 
         RenderDebugInfo();
 
@@ -130,7 +137,7 @@ public partial class FateListWindow(
 
         if (fateTable.Length == 0)
         {
-            ImGui.TextUnformatted("No active FATEs in this area.");
+            ImGui.TextUnformatted("There are no active FATEs in this area.");
             return;
         }
 
@@ -139,27 +146,31 @@ public partial class FateListWindow(
         ImGui.TextUnformatted("ID");       ImGui.NextColumn();
         ImGui.TextUnformatted("Sector");   ImGui.NextColumn();
         ImGui.TextUnformatted("Progress"); ImGui.NextColumn();
-        ImGui.TextUnformatted("Time");     ImGui.NextColumn();
-        ImGui.TextUnformatted("ETA");      ImGui.NextColumn();
-        ImGui.TextUnformatted("Go");       ImGui.NextColumn();
+        ImGui.TextUnformatted("Time left"); ImGui.NextColumn();
+        ImGui.TextUnformatted("Travel time"); ImGui.NextColumn();
+        ImGui.TextUnformatted("Actions");  ImGui.NextColumn();
         ImGui.TextUnformatted("");         ImGui.NextColumn();
         ImGui.Separator();
 
         int i = 0;
         foreach (var fate in fatePriority.GetSortedFates(fateTable))
         {
+            var isBlacklisted = fatePriority.IsBlacklisted(fate);
             var rem = fate.TimeRemaining;
             var time = rem > 0 ? $"{rem / 60:D2}:{rem % 60:D2}" : "--:--";
             var eta = nav.EstimateTravelSeconds(fate.Position);
             var etaText = $"{(int)eta / 60:D2}:{(int)eta % 60:D2}";
             var sector = fatePriority.GetSector(fate.Position);
 
-            ImGui.TextUnformatted(fate.Name.ToString());  ImGui.NextColumn();
-            ImGui.TextUnformatted(fatePriority.GetFateTemplateId(fate).ToString()); ImGui.NextColumn();
-            ImGui.TextUnformatted(((int)sector).ToString()); ImGui.NextColumn();
-            ImGui.TextUnformatted($"{fate.Progress}%");   ImGui.NextColumn();
-            ImGui.TextUnformatted(time);                  ImGui.NextColumn();
-            ImGui.TextUnformatted(etaText);               ImGui.NextColumn();
+            using (ImRaii.PushColor(ImGuiCol.Text, isBlacklisted ? 0xFF909090 : 0xFFFFFFFF))
+            {
+                ImGui.TextUnformatted(isBlacklisted ? $"[Blacklisted] {fate.Name}" : fate.Name.ToString()); ImGui.NextColumn();
+                ImGui.TextUnformatted(fatePriority.GetFateTemplateId(fate).ToString()); ImGui.NextColumn();
+                ImGui.TextUnformatted(((int)sector).ToString()); ImGui.NextColumn();
+                ImGui.TextUnformatted($"{fate.Progress}%");   ImGui.NextColumn();
+                ImGui.TextUnformatted(time);                  ImGui.NextColumn();
+                ImGui.TextUnformatted(etaText);               ImGui.NextColumn();
+            }
 
 
             // Walk button
@@ -186,18 +197,25 @@ public partial class FateListWindow(
                 }
             }
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip($"Auto-navigate to {fate.Name} (return → teleport → walk)");
+                ImGui.SetTooltip($"Automatically navigate to {fate.Name} (return, teleport, then walk)");
 
             ImGui.NextColumn();
 
             // Blacklist button
             using (ImRaii.PushFont(UiBuilder.IconFont))
             {
-                if (ImGui.Button($"{FontAwesomeIcon.Ban.ToIconString()}##blacklist_{i}"))
-                    fatePriority.Blacklist(fate);
+                using (ImRaii.PushColor(ImGuiCol.Button, isBlacklisted ? 0xFFCC6666 : 0xFF4A4A4A))
+                {
+                    if (!isBlacklisted && ImGui.Button($"{FontAwesomeIcon.Ban.ToIconString()}##blacklist_{i}"))
+                        fatePriority.Blacklist(fate);
+                    else if (isBlacklisted && ImGui.Button($"{FontAwesomeIcon.Ban.ToIconString()}##blacklisted_{i}"))
+                        fatePriority.Unblacklist(fate);
+                }
             }
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip($"Never auto-navigate to {fate.Name} again");
+                ImGui.SetTooltip(isBlacklisted
+                    ? $"Stop ignoring {fate.Name} during automatic navigation"
+                    : $"Ignore {fate.Name} during automatic navigation");
 
             ImGui.NextColumn();
             i++;

@@ -1,0 +1,96 @@
+{
+  "config": {
+    "navigation": {
+      "label": "Navigation",
+      "fields": {
+        "mount_range": {
+          "label": "Mount when travel distance exceeds"
+        }
+      }
+    },
+    "fate_priority": {
+      "label": "FATE priority",
+      "fields": {
+        "progress_weight": {
+          "label": "FATE progress importance"
+        },
+        "time_remaining_weight": {
+          "label": "Time remaining importance"
+        },
+        "travel_time_weight": {
+          "label": "Travel time importance"
+        },
+        "progress_rate_weight": {
+          "label": "Progress rate importance"
+        },
+        "preferred_sector": {
+          "label": "Preferred sector"
+        },
+        "preferred_sector_bonus": {
+          "label": "Preferred sector bonus"
+        },
+        "exclude_unreachable": {
+          "label": "Skip unreachable FATEs"
+        }
+      }
+    },
+    "item_inspection": {
+      "label": "Item inspection automation"
+    },
+    "combat": {
+      "label": "Combat automation",
+      "fields": {
+        "auto_control_enabled": {
+          "label": "Automatically control combat rotation"
+        }
+      }
+    },
+    "blacklist": {
+      "label": "Ignore list",
+      "fields": {
+        "fate_ids": {
+          "label": "FATEs to ignore"
+        },
+        "ce_event_ids": {
+          "label": "Critical engagements to ignore"
+        }
+      }
+    }
+  },
+  "generic": {
+    "none": "None"
+  },
+  "windows": {
+    "config": {
+      "title": "Botja settings"
+    },
+    "fate_list": {
+      "stop_movement": "Stop movement",
+      "settings": "Settings",
+      "auto_navigate_top_fate": "Auto-navigate to the top-priority FATE",
+      "item_inspection": "Item inspection:",
+      "start_item_inspection": "Start item inspection",
+      "stop_item_inspection": "Stop item inspection",
+      "stop_ce_signup": "Stop CE signup",
+      "join_recruiting_ce": "Join recruiting CE",
+      "recruiting_ce": "Recruiting CE: {name} (ID {id})",
+      "blacklist_ce": "Blacklist this CE",
+      "blacklist_ce_tooltip": "Never auto-join this CE again",
+      "stop_auto_mode": "Stop Auto Mode",
+      "start_auto_mode": "Start Auto Mode",
+      "auto_mode_tooltip": "Continuously travel to and fight the next FATE, joining recruiting CEs first",
+      "going_to_fate": "Going to FATE: {name}",
+      "no_active_fates": "No active FATEs in this area.",
+      "table_name": "Name",
+      "table_id": "ID",
+      "table_sector": "Sector",
+      "table_progress": "Progress",
+      "table_time": "Time",
+      "table_eta": "ETA",
+      "table_go": "Go",
+      "walk_to_fate": "Walk to {name}",
+      "auto_navigate_fate": "Auto-navigate to {name} (return, teleport, walk)",
+      "blacklist_fate": "Never auto-navigate to {name} again"
+    }
+  }
+}

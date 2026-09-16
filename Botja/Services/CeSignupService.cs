@@ -2,13 +2,14 @@ using Dalamud.Game.Chat;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game.InstanceContent;
 using LuminaDynamicEvent = Lumina.Excel.Sheets.DynamicEvent;
+using Ocelot.Config;
 using Ocelot.Lifecycle;
 using System;
 using System.Linq;
 
 namespace Botja.Services;
 
-public sealed unsafe class CeSignupService(GuiInteractionService guiInteract, IDataManager data, IChatGui chatGui, IObjectTable objects, BlacklistConfig blacklist) : IOnUpdate, IOnLoad, IOnStop
+public sealed unsafe class CeSignupService(GuiInteractionService guiInteract, IDataManager data, IChatGui chatGui, IObjectTable objects, IPluginConfig pluginConfig, IConfigSaver configSaver, IPluginLog log) : IOnUpdate, IOnLoad, IOnStop
 {
     private static readonly TimeSpan ActionDelay = TimeSpan.FromMilliseconds(500);
     private static readonly TimeSpan AttemptTimeout = TimeSpan.FromMinutes(5);
@@ -312,14 +313,31 @@ public sealed unsafe class CeSignupService(GuiInteractionService guiInteract, ID
         return dynamicEvent?.EventType.RowId == LargeScaleEventType ||
                dynamicEvent?.EnemyType.RowId == SoloEngagementEnemyType ||
                dynamicEvent?.MaxParticipants == 1 ||
-               blacklist.CeEventIds.Contains(eventId);
+               pluginConfig.Blacklist.CeEventIds.Contains(eventId);
     }
 
     // eventId here is the Lumina DynamicEvent sheet row ID (the CE's template/type ID, stable across
     // every occurrence of that CE) — not a per-instance runtime handle, so this blacklist persists.
-    public bool IsCeBlacklisted(ushort eventId) => blacklist.CeEventIds.Contains(eventId);
+    public bool IsCeBlacklisted(ushort eventId) => pluginConfig.Blacklist.CeEventIds.Contains(eventId);
 
-    public void BlacklistCe(ushort eventId) => blacklist.CeEventIds.Add(eventId);
+    public void BlacklistCe(ushort eventId)
+    {
+        if (pluginConfig.Blacklist.CeEventIds.Contains(eventId))
+            return;
+
+        pluginConfig.Blacklist.CeEventIds = [.. pluginConfig.Blacklist.CeEventIds, eventId];
+        log.Info("[Blacklist] Saving CE IDs: {CeEventIds}", string.Join(", ", pluginConfig.Blacklist.CeEventIds));
+        configSaver.Save();
+    }
+
+    public void UnblacklistCe(ushort eventId)
+    {
+        if (!pluginConfig.Blacklist.CeEventIds.Remove(eventId))
+            return;
+
+        log.Info("[Blacklist] Saving CE IDs: {CeEventIds}", string.Join(", ", pluginConfig.Blacklist.CeEventIds));
+        configSaver.Save();
+    }
 
     public string GetCeName(ushort eventId) => GetEventName(eventId);
 

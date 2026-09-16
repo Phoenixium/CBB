@@ -16,6 +16,10 @@ public partial class FateListWindow
     private int itemInspectionListRowIndex;
     private bool itemInspectionListDispatchEvent = true;
     private string ceRecruitmentButton = "Register";
+    private string genericListAddonName = "SkyIslandExchange2";
+    private int genericListNodeId = 13;
+    private int genericListRowIndex;
+    private bool genericListDispatchEvent = true;
 
     private void RenderDebugInfo()
     {
@@ -148,6 +152,24 @@ public partial class FateListWindow
         ImGui.SameLine();
         if (ImGui.Button("Send UI click##inspectAddon"))
             guiInteract.SendUiClick(inspectAddonName, uiClickName);
+
+        ImGui.Separator();
+
+        // Generic AtkComponentList row select/click — same mechanics verified on ItemInspectionList,
+        // parameterized by addon name + list node ID so it works on new addons like SkyIslandExchange2.
+        ImGui.TextUnformatted("Generic addon list test:");
+        ImGui.InputText("List addon name", ref genericListAddonName, 64);
+        ImGui.InputInt("List node ID", ref genericListNodeId);
+        if (ImGui.Button("Dump list rows"))
+            ImGui.SetClipboardText(guiInteract.DumpAddonListRows(genericListAddonName, (uint)genericListNodeId));
+        ImGui.InputInt("List row index", ref genericListRowIndex);
+        ImGui.SameLine();
+        ImGui.Checkbox("Dispatch event##genericList", ref genericListDispatchEvent);
+        if (ImGui.Button("Select list row"))
+            guiInteract.SelectAddonListRow(genericListAddonName, (uint)genericListNodeId, genericListRowIndex, genericListDispatchEvent);
+        ImGui.SameLine();
+        if (ImGui.Button("Click list row"))
+            guiInteract.ClickAddonListRow(genericListAddonName, (uint)genericListNodeId, genericListRowIndex);
 
         var mousePos = ImGui.GetMousePos();
         ImGui.TextUnformatted($"Mouse: {mousePos.X:F0}, {mousePos.Y:F0}");

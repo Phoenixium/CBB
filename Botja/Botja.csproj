@@ -9,6 +9,7 @@
     <RepoUrl>https://github.com/yourusername/Botja</RepoUrl>
   </PropertyGroup>
   <ItemGroup>
+    <Content Include="Translations\**\*.json" CopyToOutputDirectory="PreserveNewest" />
     <ProjectReference Include="..\deps\Ocelot\Ocelot\Ocelot.csproj" />
     <ProjectReference Include="..\deps\Ocelot\Ocelot.UI\Ocelot.UI.csproj" />
     <ProjectReference Include="..\deps\Ocelot\Ocelot.ECommons\Ocelot.ECommons.csproj" />

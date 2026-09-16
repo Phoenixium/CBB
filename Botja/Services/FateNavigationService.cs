@@ -51,7 +51,7 @@ public class FateNavigationService(
             {
                 new(3664, new Vector3(679.682f, 297.291f, 660.028f)), // Camp Vrdelnis
                 new(3665, new Vector3(-356.466f, 286.030f, 758.449f)), // Zuprtik Point
-                new(3666, new Vector3(-689.387f, 101.539f, -292.164f)), // Ljeban Point
+                new(3666, new Vector3(-689.387f, 276.539f, -292.164f)), // Ljeban Point
                 new(3667, new Vector3( 106.370f, 300.953f,  -130.815f)), // Hrmovir Point
             },
         };
@@ -186,7 +186,10 @@ public class FateNavigationService(
             return;
         }
 
-        bool alreadyNearShard = FindNearestShardStruct(playerPos.Value) is { } nearShard && Dist2D(playerPos.Value, nearShard.Position) <= ArrivedAtAetheryteRadius;
+        // Must match Lifestream's own real interact/detection range (ShardInteractRadius), not the
+        // looser ArrivedAtAetheryteRadius — firing the teleport from further out than Lifestream can
+        // actually detect an active (custom) aetheryte from causes "Destination could not be found (3)".
+        bool alreadyNearShard = FindNearestShardStruct(playerPos.Value) is { } nearShard && Dist2D(playerPos.Value, nearShard.Position) <= ShardInteractRadius;
         AethernetShard? sourceShard = alreadyNearShard ? null : FindNearestShardStruct(playerPos.Value);
 
         float walkToSourceDist = alreadyNearShard ? 0f : sourceShard?.Position is { } sourcePos ? Dist2D(playerPos.Value, sourcePos) : float.MaxValue;
@@ -232,7 +235,7 @@ public class FateNavigationService(
         if (destShard == null)
             return directDist / EstimatedMoveSpeed;
 
-        bool alreadyNearShard = FindNearestShardStruct(playerPos) is { } nearShard && Dist2D(playerPos, nearShard.Position) <= ArrivedAtAetheryteRadius;
+        bool alreadyNearShard = FindNearestShardStruct(playerPos) is { } nearShard && Dist2D(playerPos, nearShard.Position) <= ShardInteractRadius;
         AethernetShard? sourceShard = alreadyNearShard ? null : FindNearestShardStruct(playerPos);
 
         float walkToSourceDist = alreadyNearShard ? 0f : sourceShard?.Position is { } sourcePos ? Dist2D(playerPos, sourcePos) : float.MaxValue;
