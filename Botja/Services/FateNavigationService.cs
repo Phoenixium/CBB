@@ -59,7 +59,7 @@ public class FateNavigationService(
 
     // From BOCCHI NavigationConstants
     private const float MaxDirectWalkDistance = 80f;
-    private const float EventArrivalRadius = 5f;
+    private const float EventArrivalRadius = 10f;
     private const float ShardInteractRadius = 3.5f;
     // Wider than ShardInteractRadius — matches BOCCHI's IsAlreadyAtAetheryte arrivedRadius
     // (post-TP landings and menu-open range are often several yards from the crystal).

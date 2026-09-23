@@ -2,12 +2,15 @@ using Dalamud.Plugin.Services;
 using ECommons.Automation;
 using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Component.GUI;
+using Ocelot.Config;
 using Ocelot.Lifecycle;
 using System;
+using System.Collections.Generic;
+using System.Text;
 
 namespace Botja.Services;
 
-public unsafe partial class GuiInteractionService(IGameGui gameGui, IAddonLifecycle addonLifecycle, ItemInspectionConfig itemInspectionConfig, IPluginLog log) : IOnUpdate
+public unsafe partial class GuiInteractionService(IGameGui gameGui, IAddonLifecycle addonLifecycle, ItemInspectionConfig itemInspectionConfig, IConfigSaver configSaver, IPluginLog log) : IOnUpdate
 {
     private static readonly TimeSpan AutomationActionDelay = TimeSpan.FromMilliseconds(300);
         private static readonly TimeSpan AutomationPhaseTimeout = TimeSpan.FromMinutes(10);
@@ -414,6 +417,63 @@ public unsafe partial class GuiInteractionService(IGameGui gameGui, IAddonLifecy
         return ParseFirstInteger(textNode->NodeText.ToString());
     }
 
+    // Confirmed via AtkValues dump: rows start at index 6 with a fixed 6-value stride
+    // [itemId, iconId, name, requiredCount, ownedQuantity, flag].
+    private const int ItemInspectionAtkValueFirstRowOffset = 6;
+    private const int ItemInspectionAtkValueStride = 6;
+    private const int ItemInspectionAtkValueNameOffset = 2;
+
+    public int? GetItemInspectionTrueItemId(int rowIndex)
+    {
+        var addon = (AddonItemInspectionList*)gameGui.GetAddonByName("ItemInspectionList").Address;
+        if (addon == null || !addon->AtkUnitBase.IsVisible)
+            return null;
+
+        int valueIndex = ItemInspectionAtkValueFirstRowOffset + (rowIndex * ItemInspectionAtkValueStride);
+        if (valueIndex < 0 || valueIndex >= addon->AtkValuesCount)
+            return null;
+
+        var value = addon->AtkValues[valueIndex];
+        return value.Type == AtkValueType.Int ? value.Int : null;
+    }
+
+    private int? GetItemInspectionTrueItemIdByName(string rowName)
+    {
+        if (string.IsNullOrWhiteSpace(rowName))
+            return null;
+
+        var addon = (AddonItemInspectionList*)gameGui.GetAddonByName("ItemInspectionList").Address;
+        if (addon == null || !addon->AtkUnitBase.IsVisible)
+            return null;
+
+        string normalizedRowName = NormalizeItemInspectionText(rowName);
+        for (int valueIndex = ItemInspectionAtkValueFirstRowOffset; valueIndex + ItemInspectionAtkValueNameOffset < addon->AtkValuesCount; valueIndex += ItemInspectionAtkValueStride)
+        {
+            var itemIdValue = addon->AtkValues[valueIndex];
+            var nameValue = addon->AtkValues[valueIndex + ItemInspectionAtkValueNameOffset];
+            if (itemIdValue.Type != AtkValueType.Int || nameValue.Type is not (AtkValueType.String or AtkValueType.ConstString or AtkValueType.ManagedString))
+                continue;
+
+            string normalizedAtkName = NormalizeItemInspectionText(nameValue.String.ToString());
+            if (normalizedAtkName.Contains(normalizedRowName, StringComparison.OrdinalIgnoreCase))
+                return itemIdValue.Int;
+        }
+
+        return null;
+    }
+
+    private static string NormalizeItemInspectionText(string value)
+    {
+        var sb = new StringBuilder(value.Length);
+        foreach (char character in value)
+        {
+            if (char.IsLetterOrDigit(character) || char.IsWhiteSpace(character))
+                sb.Append(character);
+        }
+
+        return sb.ToString().Trim();
+    }
+
     private static int? ParseFirstInteger(string value)
     {
         int result = 0;
@@ -436,16 +496,117 @@ public unsafe partial class GuiInteractionService(IGameGui gameGui, IAddonLifecy
 
     private int FindFirstProcessableItemInspectionRow(AtkComponentList* list)
     {
-        for (int itemId = list->ListLength - 1; itemId >= 0; itemId--)
+        for (int rowIndex = list->ListLength - 1; rowIndex >= 0; rowIndex--)
         {
-            if (!ShouldSkipItemInspectionItem(itemId))
-                return itemId;
+            int? trueItemId = GetItemInspectionTrueItemId(rowIndex);
+            if (trueItemId is null || !ShouldSkipItemInspectionItem(trueItemId.Value))
+                return rowIndex;
         }
 
         return -1;
     }
 
     private bool ShouldSkipItemInspectionItem(int itemId) => itemInspectionConfig.SkipItemIds.Contains(itemId);
+
+    // Public wrappers for the overlay checkboxes — same SkipItemIds set the automation loop reads.
+    public bool IsItemInspectionItemSkipped(int itemId) => itemInspectionConfig.SkipItemIds.Contains(itemId);
+
+    public void SetItemInspectionItemSkipped(int itemId, bool skipped)
+    {
+        if (skipped)
+        {
+            if (itemInspectionConfig.SkipItemIds.Add(itemId))
+                configSaver.Save();
+
+            return;
+        }
+
+        if (itemInspectionConfig.SkipItemIds.Remove(itemId))
+            configSaver.Save();
+    }
+
+    public readonly record struct ItemInspectionRowPosition(int RowIndex, int TrueItemId, float CheckboxScreenX, float CheckboxScreenY, float RowHeight);
+
+    private static string? GetItemInspectionRendererName(AtkComponentListItemRenderer* renderer)
+    {
+        string? best = null;
+        for (uint textNodeId = 1; textNodeId <= 12; textNodeId++)
+        {
+            var textNode = renderer->GetTextNodeById(textNodeId);
+            if (textNode == null)
+                continue;
+
+            string value = NormalizeItemInspectionText(textNode->NodeText.ToString());
+            if (value.Length <= 3 || int.TryParse(value, out _))
+                continue;
+
+            if (best == null || value.Length > best.Length)
+                best = value;
+        }
+
+        return best;
+    }
+
+    // Screen position for a small checkbox column in the gap between the item name and the
+    // "Required" count, for each currently visible row — anchored off the Required text node's own
+    // ScreenX/ScreenY, which already includes the full cumulative scale chain.
+    public IReadOnlyList<ItemInspectionRowPosition> GetItemInspectionRowPositions(float columnGap = 24f)
+    {
+        var list = GetItemInspectionList();
+        if (list == null)
+            return [];
+
+        var raw = new List<(int RowIndex, int TrueItemId, float X, float Y)>();
+        for (int i = 0; i < list->UldManager.NodeListCount; i++)
+        {
+            var componentNode = list->UldManager.NodeList[i]->GetAsAtkComponentNode();
+            var renderer = componentNode != null ? componentNode->GetAsAtkComponentListItemRenderer() : null;
+            // Deliberately not checking requiredNode->AtkResNode.IsVisible() here — it flickers
+            // false on frames after the first, dropping every row but the one under the mouse.
+            if (renderer == null || !componentNode->AtkResNode.IsVisible())
+                continue;
+
+            var requiredNode = renderer->GetTextNodeById(4);
+            if (requiredNode == null)
+                continue;
+
+            string? rowName = GetItemInspectionRendererName(renderer);
+            int trueItemId = rowName != null
+                ? GetItemInspectionTrueItemIdByName(rowName) ?? renderer->ListItemIndex
+                : GetItemInspectionTrueItemId(renderer->ListItemIndex) ?? renderer->ListItemIndex;
+
+            raw.Add((renderer->ListItemIndex, trueItemId, requiredNode->AtkResNode.ScreenX - columnGap, requiredNode->AtkResNode.ScreenY));
+        }
+
+        raw.Sort((a, b) => a.RowIndex.CompareTo(b.RowIndex));
+
+        // The list can briefly report the same row position twice while it's still populating —
+        // drop exact duplicates instead of requiring an exact match against list->ListLength (which
+        // doesn't reliably equal the number of currently-instantiated visible row renderers).
+        for (int i = raw.Count - 1; i > 0; i--)
+        {
+            if (MathF.Abs(raw[i].Y - raw[i - 1].Y) < 0.5f)
+                raw.RemoveAt(i);
+        }
+
+        // Height*ScaleY only reflects the node's own local scale, not the full cumulative parent
+        // scale chain, and undershot the real on-screen row spacing — derive it from the actual
+        // gap between consecutive rows instead, which is already correct since ScreenY is absolute.
+        const float ScreenYOffset = 0f; // Debug: set to 0 to disable visual correction
+        var result = new List<ItemInspectionRowPosition>();
+        for (int i = 0; i < raw.Count; i++)
+        {
+            float rowHeight = i + 1 < raw.Count
+                ? raw[i + 1].Y - raw[i].Y
+                : i > 0 ? raw[i].Y - raw[i - 1].Y : 25f;
+
+            // The Required text node's ScreenY needs a visual correction; item identity comes from
+            // the rendered row name because visible list renderers are virtualized.
+            result.Add(new ItemInspectionRowPosition(raw[i].RowIndex, raw[i].TrueItemId, raw[i].X, raw[i].Y + ScreenYOffset, rowHeight));
+        }
+
+        return result;
+    }
 
     public bool ClickItemInspectionListRow(int rowIndex)
     {
@@ -502,6 +663,17 @@ public unsafe partial class GuiInteractionService(IGameGui gameGui, IAddonLifecy
     {
         var addon = (AtkUnitBase*)gameGui.GetAddonByName(addonName).Address;
         return addon != null && addon->IsVisible;
+    }
+
+    // Screen-space position/size of a native addon window, for positioning our own ImGui overlays
+    // next to it (e.g. a quick-action panel beside the appraising window).
+    public (float X, float Y, float Width, float Height)? GetAddonScreenRect(string addonName)
+    {
+        var addon = (AtkUnitBase*)gameGui.GetAddonByName(addonName).Address;
+        if (addon == null || !addon->IsVisible)
+            return null;
+
+        return (addon->X, addon->Y, addon->GetScaledWidth(true), addon->GetScaledHeight(true));
     }
 
     private AtkComponentList* GetItemInspectionList()

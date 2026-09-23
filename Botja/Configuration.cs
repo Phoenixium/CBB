@@ -6,7 +6,7 @@ using System.Collections.Generic;
 
 namespace Botja;
 
-public interface IPluginConfig : IPluginConfiguration
+public interface IPluginConfig
 {
     NavigationConfig Navigation { get; }
 
@@ -19,7 +19,7 @@ public interface IPluginConfig : IPluginConfiguration
     BlacklistConfig Blacklist { get; }
 }
 
-public sealed class PluginConfig : IPluginConfig
+public sealed class PluginConfig : IPluginConfig, IPluginConfiguration
 {
     public int Version { get; set; } = 0;
 
@@ -32,6 +32,18 @@ public sealed class PluginConfig : IPluginConfig
     public CombatConfig Combat { get; set; } = new();
 
     public BlacklistConfig Blacklist { get; set; } = new();
+
+    public void HydrateMissingSections()
+    {
+        Navigation ??= new();
+        FatePriority ??= new();
+        ItemInspection ??= new();
+        Combat ??= new();
+        Blacklist ??= new();
+        ItemInspection.SkipItemIds ??= [];
+        Blacklist.FateIds ??= [];
+        Blacklist.CeEventIds ??= [];
+    }
 }
 
 public enum FateSectorPreference

@@ -13,7 +13,7 @@ namespace Botja.Services;
 
 public unsafe partial class GuiInteractionService
 {
-    public readonly record struct ItemInspectionDebugRow(int ItemId, int Quantity, bool Skipped);
+    public readonly record struct ItemInspectionDebugRow(int RowIndex, int TrueItemId, int Quantity, bool Skipped);
 
     private bool itemInspectionEventLogging;
     private string lastItemInspectionEvent = "ItemInspectionList event logging is off.";
@@ -24,6 +24,52 @@ public unsafe partial class GuiInteractionService
         ? lastItemInspectionEvent
         : string.Join("\n", itemInspectionEvents);
 
+    // Raw AtkValues behind ItemInspectionList — the row index isn't the real game item ID, so we
+    // need to find which entry/stride in this array actually holds it before wiring that up.
+    public string DumpItemInspectionAtkValues()
+    {
+        var addon = (AddonItemInspectionList*)gameGui.GetAddonByName("ItemInspectionList").Address;
+        if (addon == null)
+            return "ItemInspectionList: not open";
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"AtkValuesCount={addon->AtkValuesCount}");
+        for (int i = 0; i < addon->AtkValuesCount; i++)
+        {
+            var value = addon->AtkValues[i];
+            string formatted = value.Type switch
+            {
+                AtkValueType.Int => value.Int.ToString(),
+                AtkValueType.UInt => value.UInt.ToString(),
+                AtkValueType.Int64 => value.Int64.ToString(),
+                AtkValueType.UInt64 => value.UInt64.ToString(),
+                AtkValueType.Float => value.Float.ToString("F2"),
+                AtkValueType.Bool => value.Bool.ToString(),
+                AtkValueType.String or AtkValueType.ConstString or AtkValueType.ManagedString => value.String.ToString(),
+                _ => "",
+            };
+
+            sb.AppendLine($"[{i}] Type={value.Type} Value={formatted}");
+        }
+
+        return sb.ToString();
+    }
+
+    // Raw numbers behind the skip-checkbox overlay, to diagnose misalignment against a real
+    // screenshot instead of guessing offsets blindly.
+    public string DumpItemInspectionRowPositions()
+    {
+        var sb = new StringBuilder();
+        float checkboxSize = 20f; // matches ImGui.GetFrameHeight() closely enough for comparison
+        foreach (var row in GetItemInspectionRowPositions())
+        {
+            float centeredY = row.CheckboxScreenY + ((row.RowHeight - checkboxSize) / 2f);
+            sb.AppendLine($"Row={row.RowIndex} ItemId={row.TrueItemId} NodeTopY={row.CheckboxScreenY:F1} RowHeight={row.RowHeight:F1} CheckboxX={row.CheckboxScreenX:F1} CenteredCheckboxY={centeredY:F1}");
+        }
+
+        return sb.ToString();
+    }
+
     public IReadOnlyList<ItemInspectionDebugRow> GetItemInspectionDebugRows()
     {
         var list = GetItemInspectionList();
@@ -31,8 +77,11 @@ public unsafe partial class GuiInteractionService
             return [];
 
         var result = new List<ItemInspectionDebugRow>();
-        for (int itemId = 0; itemId < list->ListLength; itemId++)
-            result.Add(new ItemInspectionDebugRow(itemId, GetItemInspectionListRowQuantity(itemId) ?? 0, ShouldSkipItemInspectionItem(itemId)));
+        for (int rowIndex = 0; rowIndex < list->ListLength; rowIndex++)
+        {
+            int trueItemId = GetItemInspectionTrueItemId(rowIndex) ?? rowIndex;
+            result.Add(new ItemInspectionDebugRow(rowIndex, trueItemId, GetItemInspectionListRowQuantity(rowIndex) ?? 0, ShouldSkipItemInspectionItem(trueItemId)));
+        }
 
         return result;
     }

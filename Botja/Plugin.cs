@@ -5,6 +5,7 @@ using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using Ocelot.Lifecycle;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Ocelot;
 using Ocelot.Config;
 using Ocelot.Config.Renderers.Enum;
@@ -31,7 +32,9 @@ public sealed class Plugin(IDalamudPluginInterface pluginInterface, IPluginLog l
             .ImplementationInstance!;
 
         services.LoadECommons();
-        services.AddConfig<IPluginConfig, PluginConfig>(pluginInterface);
+        services.AddBotjaConfig(pluginInterface);
+        services.RemoveAll<IConfigSaver>();
+        services.AddSingleton<IConfigSaver, BotjaConfigSaver>();
         services.AddSingleton<IConfigRenderer, ConfigRenderer>();
         services.AddSingleton(typeof(GenericDisplay<>));
         services.AddSingleton(typeof(NoOpFilter<>));
@@ -48,6 +51,12 @@ public sealed class Plugin(IDalamudPluginInterface pluginInterface, IPluginLog l
         services.AddSingleton<AutoModeService>();
         services.AddSingleton<TranslationLoader>();
         services.AddSingleton<Windows.FateListWindow>();
+        services.AddSingleton<Windows.AppraisingOverlayWindow>();
+        services.AddSingleton<Windows.AppraisingSkipOverlayWindow>();
+        // IWindow isn't auto-wired like the Lifecycle hooks (IOnUpdate etc.) — register explicitly
+        // or the WindowManager never adds it to the WindowSystem and it's never drawn.
+        services.AddSingleton<IWindow>(sp => sp.GetRequiredService<Windows.AppraisingOverlayWindow>());
+        services.AddSingleton<IWindow>(sp => sp.GetRequiredService<Windows.AppraisingSkipOverlayWindow>());
         // Registering as IMainWindow (not IWindow) so it replaces Ocelot's default empty main window.
         services.AddSingleton<IMainWindow>(sp => sp.GetRequiredService<Windows.FateListWindow>());
     }

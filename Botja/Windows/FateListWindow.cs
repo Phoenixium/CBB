@@ -23,7 +23,7 @@ public partial class FateListWindow(
     CeSignupService ceSignup,
     CombatControlService combatControl,
     AutoModeService autoMode
-) : OcelotWindow("Fate List"), IOnLoad, IOnTerritoryChanged, IMainWindow
+) : OcelotWindow("Cant be Bozja'ed"), IOnLoad, IOnTerritoryChanged, IMainWindow
 {
     // Bozjan Southern Front and Zadnor — auto-open the window on entering these zones.
     private static readonly HashSet<uint> BozjaZones = [920, 975];

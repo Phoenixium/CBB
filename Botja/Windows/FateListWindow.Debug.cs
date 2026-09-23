@@ -68,6 +68,21 @@ public partial class FateListWindow
 
         ImGui.Separator();
 
+        // Confirms what the appraising overlay computes each frame, without needing to hover-dump
+        // the native window manually.
+        ImGui.TextUnformatted("Appraising overlay debug:");
+        var appraisingRect = guiInteract.GetAddonScreenRect("ItemInspectionList");
+        ImGui.TextUnformatted(appraisingRect is { } rect
+            ? $"ItemInspectionList rect: X={rect.X:F0} Y={rect.Y:F0} W={rect.Width:F0} H={rect.Height:F0}  overlay->({rect.X + rect.Width + 8:F0},{rect.Y:F0})"
+            : "ItemInspectionList: not open");
+        if (ImGui.Button("Copy skip-checkbox row positions"))
+            ImGui.SetClipboardText(guiInteract.DumpItemInspectionRowPositions());
+        ImGui.SameLine();
+        if (ImGui.Button("Copy ItemInspection AtkValues"))
+            ImGui.SetClipboardText(guiInteract.DumpItemInspectionAtkValues());
+
+        ImGui.Separator();
+
         ImGui.TextUnformatted("CE recruitment debug:");
         if (ImGui.Button("Open Resistance Recruitment"))
             guiInteract.OpenCeRecruitmentWindow();
@@ -116,8 +131,9 @@ public partial class FateListWindow
 
         if (ImGui.Button("Dump ItemInspectionList rows"))
             ImGui.SetClipboardText(guiInteract.DumpItemInspectionListRows());
-        if (ImGui.BeginTable("ItemInspectionDebugRows", 3, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg))
+        if (ImGui.BeginTable("ItemInspectionDebugRows", 4, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg))
         {
+            ImGui.TableSetupColumn("Row");
             ImGui.TableSetupColumn("Item ID");
             ImGui.TableSetupColumn("Quantity");
             ImGui.TableSetupColumn("Skipped");
@@ -127,10 +143,12 @@ public partial class FateListWindow
             {
                 ImGui.TableNextRow();
                 ImGui.TableSetColumnIndex(0);
-                ImGui.TextUnformatted(row.ItemId.ToString());
+                ImGui.TextUnformatted(row.RowIndex.ToString());
                 ImGui.TableSetColumnIndex(1);
-                ImGui.TextUnformatted(row.Quantity.ToString());
+                ImGui.TextUnformatted(row.TrueItemId.ToString());
                 ImGui.TableSetColumnIndex(2);
+                ImGui.TextUnformatted(row.Quantity.ToString());
+                ImGui.TableSetColumnIndex(3);
                 ImGui.TextUnformatted(row.Skipped ? "yes" : "no");
             }
 
