@@ -16,6 +16,7 @@ public sealed class AutoModeService(
     IObjectTable objects,
     CeSignupService ceSignup,
     CombatControlService combatControl,
+    AutoModeState autoModeState,
     IPluginLog log
 ) : IOnUpdate
 {
@@ -33,6 +34,7 @@ public sealed class AutoModeService(
     public void Start()
     {
         IsRunning = true;
+        autoModeState.IsRunning = true;
         awaitingCePickup = false;
         Status = "Looking for the next FATE or CE.";
     }
@@ -40,6 +42,7 @@ public sealed class AutoModeService(
     public void Stop()
     {
         IsRunning = false;
+        autoModeState.IsRunning = false;
         awaitingCePickup = false;
         nav.Stop();
         if (ceSignup.IsRunning)

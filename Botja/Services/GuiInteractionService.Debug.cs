@@ -24,37 +24,6 @@ public unsafe partial class GuiInteractionService
         ? lastItemInspectionEvent
         : string.Join("\n", itemInspectionEvents);
 
-    // Raw AtkValues behind ItemInspectionList — the row index isn't the real game item ID, so we
-    // need to find which entry/stride in this array actually holds it before wiring that up.
-    public string DumpItemInspectionAtkValues()
-    {
-        var addon = (AddonItemInspectionList*)gameGui.GetAddonByName("ItemInspectionList").Address;
-        if (addon == null)
-            return "ItemInspectionList: not open";
-
-        var sb = new StringBuilder();
-        sb.AppendLine($"AtkValuesCount={addon->AtkValuesCount}");
-        for (int i = 0; i < addon->AtkValuesCount; i++)
-        {
-            var value = addon->AtkValues[i];
-            string formatted = value.Type switch
-            {
-                AtkValueType.Int => value.Int.ToString(),
-                AtkValueType.UInt => value.UInt.ToString(),
-                AtkValueType.Int64 => value.Int64.ToString(),
-                AtkValueType.UInt64 => value.UInt64.ToString(),
-                AtkValueType.Float => value.Float.ToString("F2"),
-                AtkValueType.Bool => value.Bool.ToString(),
-                AtkValueType.String or AtkValueType.ConstString or AtkValueType.ManagedString => value.String.ToString(),
-                _ => "",
-            };
-
-            sb.AppendLine($"[{i}] Type={value.Type} Value={formatted}");
-        }
-
-        return sb.ToString();
-    }
-
     // Raw numbers behind the skip-checkbox overlay, to diagnose misalignment against a real
     // screenshot instead of guessing offsets blindly.
     public string DumpItemInspectionRowPositions()
@@ -521,39 +490,6 @@ public unsafe partial class GuiInteractionService
             string parent = node->ParentNode != null ? node->ParentNode->NodeId.ToString() : "-";
             sb.AppendLine($"  [{i}] NodeId={node->NodeId} ParentId={parent} Type={node->Type} Visible={node->IsVisible()} " +
                           $"Pos=({node->X:F0},{node->Y:F0}) Size=({node->Width}x{node->Height}){text}");
-        }
-
-        return sb.ToString();
-    }
-
-    public string DumpItemInspectionListRows()
-    {
-        var addon = (AddonItemInspectionList*)gameGui.GetAddonByName("ItemInspectionList").Address;
-        if (addon == null)
-            return "ItemInspectionList: not found (not currently open)";
-
-        var list = addon->GetComponentListById(7);
-        var sb = new StringBuilder();
-        sb.AppendLine($"ItemInspectionList  ID={addon->AtkUnitBase.Id}  Visible={addon->AtkUnitBase.IsVisible}  NodeListCount={addon->AtkUnitBase.UldManager.NodeListCount}");
-        if (list != null)
-            sb.AppendLine($"List node 7: Length={list->ListLength} FirstVisible={list->FirstVisibleItemIndex} Selected={list->SelectedItemIndex} Hovered={list->HoveredItemIndex} VisibleRows={list->VisibleRowCount} NumVisibleItems={list->NumVisibleItems}");
-
-        for (int i = 0; i < addon->AtkUnitBase.UldManager.NodeListCount; i++)
-        {
-            var componentNode = addon->AtkUnitBase.UldManager.NodeList[i]->GetAsAtkComponentNode();
-            var renderer = componentNode != null ? componentNode->GetAsAtkComponentListItemRenderer() : null;
-            if (renderer == null || !componentNode->AtkResNode.IsVisible())
-                continue;
-
-            sb.AppendLine($"RowComponent NodeId={componentNode->AtkResNode.NodeId} ListItemIndex={renderer->ListItemIndex} Pos=({componentNode->AtkResNode.X:F0},{componentNode->AtkResNode.Y:F0}) Size=({componentNode->AtkResNode.Width}x{componentNode->AtkResNode.Height})");
-            for (int textNodeId = 1; textNodeId <= 12; textNodeId++)
-            {
-                var textNode = renderer->GetTextNodeById((uint)textNodeId);
-                if (textNode == null || !textNode->AtkResNode.IsVisible())
-                    continue;
-
-                sb.AppendLine($"  TextNode {textNodeId}: \"{textNode->NodeText}\"");
-            }
         }
 
         return sb.ToString();

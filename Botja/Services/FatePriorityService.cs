@@ -1,9 +1,9 @@
 using Dalamud.Game.ClientState.Fates;
 using Dalamud.Plugin.Services;
+using Ocelot.Config;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
-using Ocelot.Config;
 
 namespace Botja.Services;
 
@@ -24,9 +24,8 @@ public class FatePriorityService(
     FateNavigationService nav,
     IClientState clientState,
     FatePriorityConfig config,
-    IPluginConfig pluginConfig,
-    IConfigSaver configSaver,
-    IPluginLog log
+    BlacklistConfig blacklist,
+    IConfigSaver configSaver
 )
 {
     // Southern Front (920) sectors are stacked north-to-south, and the aethernet shards sit right at
@@ -109,38 +108,36 @@ public class FatePriorityService(
     private static bool IsAngleBetween(float angle, float from, float to) =>
         from <= to ? angle >= from && angle < to : angle >= from || angle < to;
 
-    // Highest priority first; unreachable and blacklisted FATEs sink to the bottom.
+    // Highest priority first; keep ignored FATEs here so the UI can still display them.
     public IEnumerable<IFate> GetSortedFates(IEnumerable<IFate> fates) =>
-        fates.OrderBy(IsBlacklisted).ThenByDescending(GetPriorityScore);
+        fates.OrderByDescending(GetPriorityScore);
 
-    // Used by Auto Mode and the top-priority action; blacklisted FATEs remain visible in the table
-    // but must never be selected as a destination.
     public IEnumerable<IFate> GetAutoSelectableFates(IEnumerable<IFate> fates) =>
-        fates.Where(fate => !IsBlacklisted(fate)).OrderByDescending(GetPriorityScore);
+        GetSortedFates(fates).Where(fate =>
+            !IsBlacklisted(fate)
+            && fate.Progress <= config.MaxProgressPercent
+            && fate.TimeRemaining > 0);
 
     // The stable FATE template ID (shared by every spawn of the same FATE, unlike the per-spawn
     // runtime FateId) — used as the blacklist key so a blacklisted FATE stays blacklisted across respawns.
     public uint GetFateTemplateId(IFate fate) => fate.GameData.RowId;
 
-    public bool IsBlacklisted(IFate fate) => pluginConfig.Blacklist.FateIds.Contains(GetFateTemplateId(fate));
+    public bool IsBlacklisted(IFate fate) => blacklist.FateIds.Contains(GetFateTemplateId(fate));
 
     public void Blacklist(IFate fate)
     {
         var fateId = GetFateTemplateId(fate);
-        if (pluginConfig.Blacklist.FateIds.Contains(fateId))
+        if (blacklist.FateIds.Contains(fateId))
             return;
 
-        pluginConfig.Blacklist.FateIds = [.. pluginConfig.Blacklist.FateIds, fateId];
-        log.Info("[Blacklist] Saving FATE IDs: {FateIds}", string.Join(", ", pluginConfig.Blacklist.FateIds));
+        blacklist.FateIds = [.. blacklist.FateIds, fateId];
         configSaver.Save();
     }
 
     public void Unblacklist(IFate fate)
     {
-        if (!pluginConfig.Blacklist.FateIds.Remove(GetFateTemplateId(fate)))
+        if (!blacklist.FateIds.Remove(GetFateTemplateId(fate)))
             return;
-
-        log.Info("[Blacklist] Saving FATE IDs: {FateIds}", string.Join(", ", pluginConfig.Blacklist.FateIds));
         configSaver.Save();
     }
 }

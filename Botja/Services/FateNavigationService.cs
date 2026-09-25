@@ -5,6 +5,7 @@ using Dalamud.Plugin.Services;
 using Ocelot.Actions;
 using Ocelot.Graphics;
 using Ocelot.Ipc.BossMod;
+using Ocelot.Ipc.Lifestream;
 using Ocelot.Ipc.VNavmesh;
 using Ocelot.Lifecycle;
 using Ocelot.Services.OverlayRenderer;
@@ -29,6 +30,8 @@ public class FateNavigationService(
     IPlayer player,
     IOverlayRenderer overlay,
     NavigationConfig navigationConfig,
+    HostileDetectionService hostileDetection,
+    HostileDetectionConfig hostileDetectionConfig,
     IPluginLog log
 ) : IOnUpdate, IOnRender
 {
@@ -111,6 +114,9 @@ public class FateNavigationService(
     // BOCCHI's PathfinderConfig.FloorSnapExtents default. Kept small since this only needs to find
     // the floor directly beneath the stored X/Z, not search sideways for a different spot.
     private const float MeshSnapHalfExtentXZ = 5f;
+    private const float AvoidanceFinalApproachBuffer = 20f;
+    private const long AvoidanceCooldownMs = 2_000;
+    private const int MaxAvoidanceAttempts = 3;
 
     private TeleportPhase phase;
     private Vector3 pendingDestination;
@@ -131,6 +137,10 @@ public class FateNavigationService(
     // would loop through fight/flee forever and never actually get us there.
     private bool combatResolveAttempted;
     private bool resumingAfterCombatResolve;
+    private bool avoidingHostile;
+    private Vector3 avoidanceTarget;
+    private long lastAvoidanceMs;
+    private int avoidanceAttempts;
 
     private static long NowMs() => Environment.TickCount64;
     private long PhaseElapsedMs => NowMs() - phaseStartMs;
@@ -350,7 +360,7 @@ public class FateNavigationService(
         bool queued;
         try
         {
-            Actions.TryUnmount(player);
+            Actions.Unmount.Cast();
             queued = lifestream.AethernetTeleportByPlaceNameId(shard.Value.PlaceNameId);
         }
         catch (Exception ex)
@@ -394,7 +404,7 @@ public class FateNavigationService(
         SafeStopVnav();
         try
         {
-            Actions.TryUnmount(player);
+            Actions.Unmount.Cast();
             bool queued = lifestream.AethernetTeleportByPlaceNameId(shard.Value.PlaceNameId);
             if (!queued)
                 log.Warning("[FateNav] TeleportToward({Destination}): lifestream.AethernetTeleportByPlaceNameId({PlaceNameId}) returned false", destination, shard.Value.PlaceNameId);
@@ -418,6 +428,65 @@ public class FateNavigationService(
             log.Warning(ex, "[FateNav] vnavmesh PathfindAndMoveCloseTo failed for {Destination}", target);
             CancelPending();
         }
+    }
+
+    private bool UpdateHostileAvoidance(Vector3 destination, float arrivalRange)
+    {
+        if (objects.LocalPlayer is not { } currentPlayer)
+            return false;
+
+        if (!hostileDetectionConfig.EnableNavmeshAvoidance)
+        {
+            if (avoidingHostile)
+                StartMove(destination, arrivalRange);
+            avoidingHostile = false;
+            return false;
+        }
+
+        if (Dist2D(currentPlayer.Position, destination) <= arrivalRange + AvoidanceFinalApproachBuffer)
+        {
+            if (avoidingHostile && Dist2D(currentPlayer.Position, destination) > arrivalRange)
+                StartMove(destination, arrivalRange);
+
+            avoidingHostile = false;
+            return false;
+        }
+
+        if (avoidingHostile)
+        {
+            if (Dist2D(currentPlayer.Position, avoidanceTarget) <= arrivalRange)
+            {
+                avoidingHostile = false;
+                StartMove(destination, arrivalRange);
+            }
+
+            return true;
+        }
+
+        if (avoidanceAttempts >= MaxAvoidanceAttempts
+            || NowMs() - lastAvoidanceMs < AvoidanceCooldownMs
+            || !hostileDetection.TryGetBlockingHostile(currentPlayer.Position, destination, hostileDetectionConfig.AvoidanceClearanceYalms, out var hostile))
+            return false;
+
+        Vector2 route = new(destination.X - currentPlayer.Position.X, destination.Z - currentPlayer.Position.Z);
+        float routeLength = route.Length();
+        if (routeLength <= 0.01f)
+            return false;
+
+        route /= routeLength;
+        Vector2 toHostile = new(hostile.Position.X - currentPlayer.Position.X, hostile.Position.Z - currentPlayer.Position.Z);
+        float side = route.X * toHostile.Y - route.Y * toHostile.X >= 0f ? -1f : 1f;
+        Vector2 lateral = new(-route.Y * side, route.X * side);
+        Vector2 detour = new Vector2(hostile.Position.X, hostile.Position.Z)
+            + lateral * hostileDetectionConfig.AvoidanceClearanceYalms;
+
+        avoidanceTarget = new Vector3(detour.X, hostile.Position.Y, detour.Y);
+        avoidingHostile = true;
+        avoidanceAttempts++;
+        lastAvoidanceMs = NowMs();
+        log.Debug("[FateNav] Hostile avoidance: detouring around {Name} at {Position} via {Detour}", hostile.Name, hostile.Position, avoidanceTarget);
+        StartMove(avoidanceTarget, arrivalRange);
+        return true;
     }
 
     // A stale/bad stored coordinate (e.g. a shard's Y off by 100+ yalms) makes vnav hard-fail the
@@ -469,6 +538,9 @@ public class FateNavigationService(
 
         if (phase == TeleportPhase.WalkingToSourceShard)
         {
+            if (UpdateHostileAvoidance(pendingSourceShardPos, ShardInteractRadius))
+                return;
+
             bool arrived = objects.LocalPlayer is { } player && Dist2D(player.Position, pendingSourceShardPos) <= ShardInteractRadius;
             if (arrived)
             {
@@ -580,13 +652,16 @@ public class FateNavigationService(
         }
         else if (phase == TeleportPhase.WalkingToDestination)
         {
+            if (UpdateHostileAvoidance(pendingDestination, EventArrivalRadius))
+                return;
+
             bool arrived = objects.LocalPlayer is { } p && Dist2D(p.Position, pendingDestination) <= EventArrivalRadius;
             if (arrived || PhaseElapsedMs > WalkToDestinationTimeoutMs)
             {
                 log.Debug("[FateNav] Update: WalkingToDestination done after {Ticks} ticks (Arrived={Arrived})", phaseTicks, arrived);
                 if (arrived)
                 {
-                    Actions.TryUnmount(player);
+                    Actions.Unmount.Cast();
                 }
 
                 CancelPending();
@@ -648,6 +723,8 @@ public class FateNavigationService(
         phase = TeleportPhase.None;
         phaseTicks = 0;
         phaseStartMs = NowMs();
+        avoidingHostile = false;
+        avoidanceAttempts = 0;
     }
 
     // Shared decision point for a failed/rejected aethernet hop — retries a bounded number of times

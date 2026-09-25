@@ -20,7 +20,6 @@ project.lock.json
 project.fragment.lock.json
 packages.lock.json
 artifacts/
-directory.build.*
 
 ## Rider ##
 .idea/

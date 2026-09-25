@@ -3,6 +3,8 @@ using FFXIVClientStructs.FFXIV.Client.Game.InstanceContent;
 using Ocelot.Lifecycle;
 using Ocelot.Rotation.Services;
 using System;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace Botja.Services;
 
@@ -12,19 +14,25 @@ namespace Botja.Services;
 //   - on once arrived, as long as the targeted FATE/CE is still active
 //   - off again the moment that FATE/CE ends (fate leaves the fate table / CE stops being current)
 public sealed unsafe class CombatControlService(
-    IRotationService rotation,
+    IEnumerable<ISelectableCombatAi> aiBackends,
     FateNavigationService nav,
     CeSignupService ceSignup,
+    AutoModeState autoModeState,
+    BossModActiveProfilesService bossModProfiles,
     IFateTable fateTable,
     CombatConfig config,
     IPluginLog log
 ) : IOnUpdate
 {
-    private bool loaded;
+    private bool presetsReady;
     private bool loadGaveUp;
     private int loadAttempts;
     private long nextLoadAttemptMs;
     private bool combatEnabled;
+    private bool stateInitialized;
+    private bool wasActive;
+    private bool manualEnabled;
+    private bool backendDiagnosticLogged;
     private uint activeFateId;
     private ushort activeCeEventId;
 
@@ -38,19 +46,54 @@ public sealed unsafe class CombatControlService(
     public uint ActiveFateId => activeFateId;
     public ushort ActiveCeEventId => activeCeEventId;
 
+    // Manual override: forces the selected combat AI(s) on regardless of Auto Mode/FATE/CE/travel
+    // state, for direct "just fight now" control from the UI.
+    public bool ManualEnabled => manualEnabled;
+
+    public void StartManualCombat() => manualEnabled = true;
+
+    public void StopManualCombat() => manualEnabled = false;
+
     // Arms combat for a specific FATE — call this whenever navigation is sent toward a FATE.
     public void SetActiveFate(uint fateId) => activeFateId = fateId;
 
     public void Update()
     {
-        if (!loaded && !loadGaveUp && Environment.TickCount64 >= nextLoadAttemptMs)
+        if (!backendDiagnosticLogged)
+        {
+            backendDiagnosticLogged = true;
+            log.Information("[CombatAI] CombatControl received {Count} backends: {Kinds}", aiBackends.Count(), string.Join(", ", aiBackends.Select(backend => $"{backend.Kind} ({backend.GetType().Name})")));
+        }
+
+        if (!autoModeState.IsRunning && !manualEnabled)
+        {
+            if (wasActive || combatEnabled || !stateInitialized)
+            {
+                combatEnabled = false;
+                stateInitialized = true;
+                DisableAll();
+            }
+
+            wasActive = false;
+            return;
+        }
+
+        if (!wasActive)
+        {
+            presetsReady = false;
+            loadGaveUp = false;
+            loadAttempts = 0;
+            nextLoadAttemptMs = 0;
+            wasActive = true;
+        }
+
+        if (!presetsReady && !loadGaveUp && Environment.TickCount64 >= nextLoadAttemptMs)
         {
             try
             {
-                // Lazy: DynamicRotationService only resolves its underlying provider on its own
-                // IOnPreUpdate tick, which runs before ours, so `current` is already set by now.
-                rotation.Load();
-                loaded = true;
+                foreach (var backend in SelectedBackends())
+                    backend.EnsurePresets();
+                presetsReady = true;
             }
             catch (Exception ex)
             {
@@ -58,14 +101,14 @@ public sealed unsafe class CombatControlService(
                 if (loadAttempts >= MaxLoadAttempts)
                 {
                     loadGaveUp = true;
-                    log.Warning(ex, "[CombatControl] rotation.Load() failed {Attempts} times, giving up — is a supported rotation plugin (Wrath/BossMod/RSR) installed and enabled?", loadAttempts);
+                    log.Warning(ex, "[CombatControl] combat-AI preset setup failed {Attempts} times, giving up", loadAttempts);
                 }
                 else
                 {
                     // The rotation plugin's IPC (e.g. BossMod.Presets.Create) can still be unregistered
                     // for a few ticks right after it loads — back off and retry instead of throwing every tick.
                     long backoffMs = Math.Min(LoadRetryBaseMs << (loadAttempts - 1), LoadRetryMaxMs);
-                    log.Debug(ex, "[CombatControl] rotation.Load() failed (attempt {Attempts}/{Max}), retrying in {BackoffMs}ms", loadAttempts, MaxLoadAttempts, backoffMs);
+                    log.Debug(ex, "[CombatControl] combat-AI preset setup failed (attempt {Attempts}/{Max}), retrying in {BackoffMs}ms", loadAttempts, MaxLoadAttempts, backoffMs);
                     nextLoadAttemptMs = Environment.TickCount64 + backoffMs;
                 }
             }
@@ -81,9 +124,6 @@ public sealed unsafe class CombatControlService(
         if (activeCeEventId == 0 && ceSignup.TryGetCurrentEventId(out var currentCeEventId))
             activeCeEventId = currentCeEventId;
 
-        if (!config.AutoControlEnabled)
-            return;
-
         // ResolvingCombat is FateNavigationService actively trying to fight/flee off whatever blocked
         // a teleport — treat that like "arrived", not "travelling", so the rotation can help clear it.
         bool traveling = nav.IsNavigating && !nav.IsResolvingCombat;
@@ -97,30 +137,68 @@ public sealed unsafe class CombatControlService(
         if (activeCeEventId != 0 && !ceActive)
             activeCeEventId = 0;
 
-        bool shouldFight = !traveling && (fateActive || ceActive);
-        if (shouldFight == combatEnabled)
+        bool shouldFight = manualEnabled || (config.AutoControlEnabled && !traveling && (fateActive || ceActive));
+        if (stateInitialized && shouldFight == combatEnabled)
             return;
 
+        stateInitialized = true;
         combatEnabled = shouldFight;
-        try
+        if (combatEnabled)
         {
-            if (combatEnabled)
-            {
-                log.Debug("[CombatControl] Enabling auto-rotation (fate {FateId}, ce {CeId})", activeFateId, activeCeEventId);
-                rotation.EnableAutoRotation();
-            }
-            else
-            {
-                log.Debug("[CombatControl] Disabling auto-rotation (traveling={Traveling})", traveling);
-                rotation.DisableAutoRotation();
-            }
+            var activity = ceActive ? CombatActivity.CriticalEncounter : fateActive ? CombatActivity.Fate : CombatActivity.MobFarm;
+            log.Debug("[CombatControl] Enabling selected combat AIs (manual={Manual}, fate {FateId}, ce {CeId})", manualEnabled, activeFateId, activeCeEventId);
+            EnableSelected(activity);
         }
-        catch (Exception ex)
+        else
         {
-            // Same IPC-not-ready race as rotation.Load() — the rotation plugin can vanish/reload mid-session.
-            log.Debug(ex, "[CombatControl] rotation.{Method}() failed", combatEnabled ? "EnableAutoRotation" : "DisableAutoRotation");
+            log.Debug("[CombatControl] Disabling all combat AIs (traveling={Traveling}, fateActive={FateActive}, ceActive={CeActive})", traveling, fateActive, ceActive);
+            DisableAll();
         }
     }
+
+    private IEnumerable<ISelectableCombatAi> SelectedBackends() =>
+        aiBackends.Where(backend => config.SelectedAis.Contains(backend.Kind) &&
+            (config.SelectedBossModProfiles.Count == 0 || !IsBossModBackend(backend.Kind)));
+
+    private void EnableSelected(CombatActivity activity)
+    {
+        DisableAll();
+
+        if (config.SelectedBossModProfiles.Count > 0 && !bossModProfiles.SetActiveNames(config.SelectedBossModProfiles))
+            log.Warning("[CombatControl] Failed to activate selected BossMod profiles");
+
+        foreach (var backend in SelectedBackends())
+        {
+            try
+            {
+                backend.Enable(activity);
+            }
+            catch (Exception ex)
+            {
+                log.Debug(ex, "[CombatControl] Failed to enable combat AI {Kind}", backend.Kind);
+            }
+        }
+    }
+
+    private void DisableAll()
+    {
+        bossModProfiles.ClearActive();
+
+        foreach (var backend in aiBackends)
+        {
+            try
+            {
+                backend.Disable();
+            }
+            catch (Exception ex)
+            {
+                log.Debug(ex, "[CombatControl] Failed to disable combat AI {Kind}", backend.Kind);
+            }
+        }
+    }
+
+    private static bool IsBossModBackend(CombatAiSelection kind) =>
+        kind is CombatAiSelection.MiscAi or CombatAiSelection.BossMod or CombatAiSelection.BossModReborn;
 
     private bool IsFateStillActive(uint fateId)
     {

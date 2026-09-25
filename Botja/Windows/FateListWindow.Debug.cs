@@ -77,9 +77,6 @@ public partial class FateListWindow
             : "ItemInspectionList: not open");
         if (ImGui.Button("Copy skip-checkbox row positions"))
             ImGui.SetClipboardText(guiInteract.DumpItemInspectionRowPositions());
-        ImGui.SameLine();
-        if (ImGui.Button("Copy ItemInspection AtkValues"))
-            ImGui.SetClipboardText(guiInteract.DumpItemInspectionAtkValues());
 
         ImGui.Separator();
 
@@ -130,7 +127,7 @@ public partial class FateListWindow
             guiInteract.ClickItemInspectionResultClose();
 
         if (ImGui.Button("Dump ItemInspectionList rows"))
-            ImGui.SetClipboardText(guiInteract.DumpItemInspectionListRows());
+            ImGui.SetClipboardText(guiInteract.DumpAddonListRows("ItemInspectionList", 7));
         if (ImGui.BeginTable("ItemInspectionDebugRows", 4, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg))
         {
             ImGui.TableSetupColumn("Row");

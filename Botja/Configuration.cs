@@ -1,7 +1,9 @@
 using Dalamud.Configuration;
 using Ocelot.Config;
 using Ocelot.Config.Fields;
+using Botja.Services;
 using Botja.Windows;
+using Botja.Windows.Config;
 using System.Collections.Generic;
 
 namespace Botja;
@@ -17,6 +19,8 @@ public interface IPluginConfig
     CombatConfig Combat { get; }
 
     BlacklistConfig Blacklist { get; }
+
+    HostileDetectionConfig HostileDetection { get; }
 }
 
 public sealed class PluginConfig : IPluginConfig, IPluginConfiguration
@@ -33,6 +37,8 @@ public sealed class PluginConfig : IPluginConfig, IPluginConfiguration
 
     public BlacklistConfig Blacklist { get; set; } = new();
 
+    public HostileDetectionConfig HostileDetection { get; set; } = new();
+
     public void HydrateMissingSections()
     {
         Navigation ??= new();
@@ -40,9 +46,12 @@ public sealed class PluginConfig : IPluginConfig, IPluginConfiguration
         ItemInspection ??= new();
         Combat ??= new();
         Blacklist ??= new();
+        HostileDetection ??= new();
         ItemInspection.SkipItemIds ??= [];
         Blacklist.FateIds ??= [];
         Blacklist.CeEventIds ??= [];
+        Combat.SelectedAis ??= [];
+        Combat.SelectedBossModProfiles ??= [];
     }
 }
 
@@ -76,6 +85,10 @@ public sealed class FatePriorityConfig : IAutoConfig
 
     [Checkbox]
     public bool ExcludeUnreachable { get; set; } = true;
+
+    // FATEs with progress above this are never picked as auto-navigate targets.
+    [FloatRange(0f, 100f)]
+    public float MaxProgressPercent { get; set; } = 100f;
 }
 
 public sealed class NavigationConfig : IAutoConfig
@@ -87,6 +100,7 @@ public sealed class NavigationConfig : IAutoConfig
 
 public sealed class ItemInspectionConfig : IAutoConfig
 {
+    [ItemInspectionChecklist]
     public HashSet<int> SkipItemIds { get; set; } = [];
 }
 
@@ -96,16 +110,41 @@ public sealed class CombatConfig : IAutoConfig
     // off while travelling, off once the current FATE/CE has ended, on while actively fighting it.
     [Checkbox]
     public bool AutoControlEnabled { get; set; } = true;
+
+    [CombatAiChecklist]
+    public List<CombatAiSelection> SelectedAis { get; set; } = [];
+
+    [BossModProfileChecklist]
+    public List<string> SelectedBossModProfiles { get; set; } = [];
 }
 
 // Fate/CE template IDs (not per-instance runtime IDs) the player never wants Auto Mode to pick.
 public sealed class BlacklistConfig : IAutoConfig
 {
     [BlacklistChecklist(false)]
-    public List<uint> FateIds { get; set; } = [];
+    public HashSet<uint> FateIds { get; set; } = [];
 
     [BlacklistChecklist(true)]
-    public List<uint> CeEventIds { get; set; } = [];
+    public HashSet<uint> CeEventIds { get; set; } = [];
+}
+
+public sealed class HostileDetectionConfig : IAutoConfig
+{
+    // Maximum distance at which hostile NPCs are tracked.
+    [FloatRange(5f, 200f)]
+    public float DetectionRadiusYalms { get; set; } = 100f;
+
+    // Distance considered unsafe around a hostile when checking a position.
+    [FloatRange(5f, 100f)]
+    public float DangerRadiusYalms { get; set; } = 25f;
+
+    // Detour around hostiles blocking the path instead of walking straight through them.
+    [Checkbox]
+    public bool EnableNavmeshAvoidance { get; set; } = true;
+
+    // How far to the side of a blocking hostile to route the detour.
+    [FloatRange(1f, 30f)]
+    public float AvoidanceClearanceYalms { get; set; } = 8f;
 }
 
 

@@ -7,7 +7,7 @@ using Ocelot.Config.Fields;
 using Ocelot.Config.Renderers;
 using Ocelot.Services.Translation;
 
-namespace Botja.Windows;
+namespace Botja.Windows.Config;
 
 public sealed class BlacklistChecklistAttribute(bool criticalEngagements)
     : UIFieldAttribute(typeof(BlacklistChecklistRenderer))
@@ -62,7 +62,7 @@ public sealed class BlacklistChecklistRenderer(IClientState clientState)
             return false;
         }
 
-        var ignoredIds = (List<uint>?)prop.GetValue(target) ?? [];
+        var ignoredIds = (HashSet<uint>?)prop.GetValue(target) ?? [];
         var changed = false;
         ImGui.TextUnformatted(attr.CriticalEngagements ? "Critical Engagements" : "FATEs / Skirmishes");
         ImGui.Separator();

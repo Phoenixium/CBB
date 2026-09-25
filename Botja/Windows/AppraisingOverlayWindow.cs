@@ -13,7 +13,7 @@ public class AppraisingOverlayWindow(GuiInteractionService guiInteract)
 {
     private const string TargetAddonName = "ItemInspectionList";
     private const float HorizontalGap = 8f;
-    private static readonly Vector2 OverlaySize = new(220, 110);
+    private static readonly Vector2 OverlaySize = new(120, 80);
 
     // WindowHost.DrawInternal calls PreOpenCheck() unconditionally every frame, BEFORE checking
     // IsOpen — unlike Update(), which is only reached once IsOpen is already true. Since this window

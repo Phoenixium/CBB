@@ -1,0 +1,15 @@
+<Project>
+  <!--
+    The 'dev' Dalamud folder is populated by launching FFXIV with Dalamud.
+    Until then, search installed versioned folders so assemblies like
+    FFXIVClientStructs.dll resolve without hardcoding a Dalamud version.
+  -->
+  <ItemGroup Condition="!Exists('$(DalamudLibPath)FFXIVClientStructs.dll')">
+    <_DalamudFallbackAssembly
+      Include="$(APPDATA)\XIVLauncher\addon\Hooks\*\FFXIVClientStructs.dll"
+      Exclude="$(APPDATA)\XIVLauncher\addon\Hooks\dev\FFXIVClientStructs.dll" />
+  </ItemGroup>
+  <PropertyGroup Condition="!Exists('$(DalamudLibPath)FFXIVClientStructs.dll')">
+    <AssemblySearchPaths>$(AssemblySearchPaths);@(_DalamudFallbackAssembly->'%(RootDir)%(Directory)')</AssemblySearchPaths>
+  </PropertyGroup>
+</Project>

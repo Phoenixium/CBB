@@ -417,11 +417,72 @@ public unsafe partial class GuiInteractionService(IGameGui gameGui, IAddonLifecy
         return ParseFirstInteger(textNode->NodeText.ToString());
     }
 
-    // Confirmed via AtkValues dump: rows start at index 6 with a fixed 6-value stride
-    // [itemId, iconId, name, requiredCount, ownedQuantity, flag].
+    // Confirmed via a full AtkValues dump: rows start at index 6 with a fixed 6-value stride
+    // [itemId, iconId, name, requiredCount, ownedQuantity, flag] — 24 real rows total.
     private const int ItemInspectionAtkValueFirstRowOffset = 6;
     private const int ItemInspectionAtkValueStride = 6;
-    private const int ItemInspectionAtkValueNameOffset = 2;
+
+    // Unused/recycled renderer-pool slots can still report IsVisible=true but carry no real item
+    // text — used purely to reject those, never for row identity (identity comes from ListItemIndex).
+    private static bool HasItemInspectionRowContent(AtkComponentListItemRenderer* renderer)
+    {
+        for (uint textNodeId = 1; textNodeId <= 12; textNodeId++)
+        {
+            var textNode = renderer->GetTextNodeById(textNodeId);
+            if (textNode == null)
+                continue;
+
+            string value = textNode->NodeText.ToString().Trim();
+            if (value.Length > 3 && !int.TryParse(value, out _))
+                return true;
+        }
+
+        return false;
+    }
+
+    private readonly record struct ItemInspectionAtkValueRow(int BlockIndex, int ItemId, int? OwnedQuantity);
+
+    // Parses every real row out of the raw AtkValues array (bounded by AtkValuesCount, NOT
+    // list->ListLength — confirmed that field only counts currently-visible rows, see below).
+    private List<ItemInspectionAtkValueRow> ParseItemInspectionAtkValueRows(AddonItemInspectionList* addon)
+    {
+        var rows = new List<ItemInspectionAtkValueRow>();
+        for (int blockIndex = 0; ; blockIndex++)
+        {
+            int valueIndex = ItemInspectionAtkValueFirstRowOffset + (blockIndex * ItemInspectionAtkValueStride);
+            if (valueIndex + 4 >= addon->AtkValuesCount)
+                break;
+
+            var itemIdValue = addon->AtkValues[valueIndex];
+            if (itemIdValue.Type != AtkValueType.Int)
+                break;
+
+            var ownedValue = addon->AtkValues[valueIndex + 4];
+            int? ownedQuantity = ownedValue.Type == AtkValueType.Int ? ownedValue.Int : null;
+
+            rows.Add(new ItemInspectionAtkValueRow(blockIndex, itemIdValue.Int, ownedQuantity));
+        }
+
+        return rows;
+    }
+
+    // Confirmed via a full AtkValues dump cross-referenced against the in-game list: the game hides
+    // any row with ownedQuantity==0 from the visible turn-in list entirely, and
+    // renderer->ListItemIndex is numbered densely over ONLY the still-visible rows — NOT the raw
+    // AtkValues block index. E.g. block 19 "Clarity" had ListItemIndex 15 because 4 earlier
+    // zero-quantity rows (blocks 6, 7, 15, 17) are skipped before it. Reconstruct that same dense
+    // list here and index into it directly instead of the raw block-index formula.
+    private List<ItemInspectionAtkValueRow> GetVisibleItemInspectionAtkValueRows(AddonItemInspectionList* addon)
+    {
+        var visible = new List<ItemInspectionAtkValueRow>();
+        foreach (var row in ParseItemInspectionAtkValueRows(addon))
+        {
+            if ((row.OwnedQuantity ?? 1) > 0)
+                visible.Add(row);
+        }
+
+        return visible;
+    }
 
     public int? GetItemInspectionTrueItemId(int rowIndex)
     {
@@ -429,49 +490,11 @@ public unsafe partial class GuiInteractionService(IGameGui gameGui, IAddonLifecy
         if (addon == null || !addon->AtkUnitBase.IsVisible)
             return null;
 
-        int valueIndex = ItemInspectionAtkValueFirstRowOffset + (rowIndex * ItemInspectionAtkValueStride);
-        if (valueIndex < 0 || valueIndex >= addon->AtkValuesCount)
+        var visible = GetVisibleItemInspectionAtkValueRows(addon);
+        if (rowIndex < 0 || rowIndex >= visible.Count)
             return null;
 
-        var value = addon->AtkValues[valueIndex];
-        return value.Type == AtkValueType.Int ? value.Int : null;
-    }
-
-    private int? GetItemInspectionTrueItemIdByName(string rowName)
-    {
-        if (string.IsNullOrWhiteSpace(rowName))
-            return null;
-
-        var addon = (AddonItemInspectionList*)gameGui.GetAddonByName("ItemInspectionList").Address;
-        if (addon == null || !addon->AtkUnitBase.IsVisible)
-            return null;
-
-        string normalizedRowName = NormalizeItemInspectionText(rowName);
-        for (int valueIndex = ItemInspectionAtkValueFirstRowOffset; valueIndex + ItemInspectionAtkValueNameOffset < addon->AtkValuesCount; valueIndex += ItemInspectionAtkValueStride)
-        {
-            var itemIdValue = addon->AtkValues[valueIndex];
-            var nameValue = addon->AtkValues[valueIndex + ItemInspectionAtkValueNameOffset];
-            if (itemIdValue.Type != AtkValueType.Int || nameValue.Type is not (AtkValueType.String or AtkValueType.ConstString or AtkValueType.ManagedString))
-                continue;
-
-            string normalizedAtkName = NormalizeItemInspectionText(nameValue.String.ToString());
-            if (normalizedAtkName.Contains(normalizedRowName, StringComparison.OrdinalIgnoreCase))
-                return itemIdValue.Int;
-        }
-
-        return null;
-    }
-
-    private static string NormalizeItemInspectionText(string value)
-    {
-        var sb = new StringBuilder(value.Length);
-        foreach (char character in value)
-        {
-            if (char.IsLetterOrDigit(character) || char.IsWhiteSpace(character))
-                sb.Append(character);
-        }
-
-        return sb.ToString().Trim();
+        return visible[rowIndex].ItemId;
     }
 
     private static int? ParseFirstInteger(string value)
@@ -527,72 +550,59 @@ public unsafe partial class GuiInteractionService(IGameGui gameGui, IAddonLifecy
 
     public readonly record struct ItemInspectionRowPosition(int RowIndex, int TrueItemId, float CheckboxScreenX, float CheckboxScreenY, float RowHeight);
 
-    private static string? GetItemInspectionRendererName(AtkComponentListItemRenderer* renderer)
-    {
-        string? best = null;
-        for (uint textNodeId = 1; textNodeId <= 12; textNodeId++)
-        {
-            var textNode = renderer->GetTextNodeById(textNodeId);
-            if (textNode == null)
-                continue;
-
-            string value = NormalizeItemInspectionText(textNode->NodeText.ToString());
-            if (value.Length <= 3 || int.TryParse(value, out _))
-                continue;
-
-            if (best == null || value.Length > best.Length)
-                best = value;
-        }
-
-        return best;
-    }
-
     // Screen position for a small checkbox column in the gap between the item name and the
     // "Required" count, for each currently visible row — anchored off the Required text node's own
     // ScreenX/ScreenY, which already includes the full cumulative scale chain.
     public IReadOnlyList<ItemInspectionRowPosition> GetItemInspectionRowPositions(float columnGap = 24f)
     {
+        var addon = (AddonItemInspectionList*)gameGui.GetAddonByName("ItemInspectionList").Address;
+        if (addon == null || !addon->AtkUnitBase.IsVisible)
+            return [];
+
         var list = GetItemInspectionList();
         if (list == null)
             return [];
 
-        var raw = new List<(int RowIndex, int TrueItemId, float X, float Y)>();
+        // The renderer POOL includes unused/recycled slots that still report IsVisible=true,
+        // sometimes with a real leftover item name, and can share a stale (not yet repositioned)
+        // ScreenY with a genuinely visible row. Restrict to the known-visible index window and
+        // require real row content instead of trusting IsVisible()/ScreenY alone.
+        int firstVisible = list->FirstVisibleItemIndex;
+        int visibleCount = list->NumVisibleItems;
+        int lastVisible = visibleCount > 0 ? firstVisible + visibleCount - 1 : int.MaxValue;
+
+        var raw = new List<(int ListItemIndex, float X, float Y)>();
         for (int i = 0; i < list->UldManager.NodeListCount; i++)
         {
             var componentNode = list->UldManager.NodeList[i]->GetAsAtkComponentNode();
             var renderer = componentNode != null ? componentNode->GetAsAtkComponentListItemRenderer() : null;
-            // Deliberately not checking requiredNode->AtkResNode.IsVisible() here — it flickers
-            // false on frames after the first, dropping every row but the one under the mouse.
             if (renderer == null || !componentNode->AtkResNode.IsVisible())
+                continue;
+
+            if (renderer->ListItemIndex < firstVisible || renderer->ListItemIndex > lastVisible)
                 continue;
 
             var requiredNode = renderer->GetTextNodeById(4);
             if (requiredNode == null)
                 continue;
 
-            string? rowName = GetItemInspectionRendererName(renderer);
-            int trueItemId = rowName != null
-                ? GetItemInspectionTrueItemIdByName(rowName) ?? renderer->ListItemIndex
-                : GetItemInspectionTrueItemId(renderer->ListItemIndex) ?? renderer->ListItemIndex;
+            if (!HasItemInspectionRowContent(renderer))
+                continue;
 
-            raw.Add((renderer->ListItemIndex, trueItemId, requiredNode->AtkResNode.ScreenX - columnGap, requiredNode->AtkResNode.ScreenY));
+            raw.Add((renderer->ListItemIndex, requiredNode->AtkResNode.ScreenX - columnGap, requiredNode->AtkResNode.ScreenY));
         }
 
-        raw.Sort((a, b) => a.RowIndex.CompareTo(b.RowIndex));
-
-        // The list can briefly report the same row position twice while it's still populating —
-        // drop exact duplicates instead of requiring an exact match against list->ListLength (which
-        // doesn't reliably equal the number of currently-instantiated visible row renderers).
+        raw.Sort((a, b) => a.ListItemIndex.CompareTo(b.ListItemIndex));
         for (int i = raw.Count - 1; i > 0; i--)
         {
-            if (MathF.Abs(raw[i].Y - raw[i - 1].Y) < 0.5f)
+            if (raw[i].ListItemIndex == raw[i - 1].ListItemIndex)
                 raw.RemoveAt(i);
         }
 
         // Height*ScaleY only reflects the node's own local scale, not the full cumulative parent
         // scale chain, and undershot the real on-screen row spacing — derive it from the actual
         // gap between consecutive rows instead, which is already correct since ScreenY is absolute.
-        const float ScreenYOffset = 0f; // Debug: set to 0 to disable visual correction
+        var visibleAtkRows = GetVisibleItemInspectionAtkValueRows(addon);
         var result = new List<ItemInspectionRowPosition>();
         for (int i = 0; i < raw.Count; i++)
         {
@@ -600,9 +610,11 @@ public unsafe partial class GuiInteractionService(IGameGui gameGui, IAddonLifecy
                 ? raw[i + 1].Y - raw[i].Y
                 : i > 0 ? raw[i].Y - raw[i - 1].Y : 25f;
 
-            // The Required text node's ScreenY needs a visual correction; item identity comes from
-            // the rendered row name because visible list renderers are virtualized.
-            result.Add(new ItemInspectionRowPosition(raw[i].RowIndex, raw[i].TrueItemId, raw[i].X, raw[i].Y + ScreenYOffset, rowHeight));
+            int listItemIndex = raw[i].ListItemIndex;
+            int trueItemId = listItemIndex >= 0 && listItemIndex < visibleAtkRows.Count
+                ? visibleAtkRows[listItemIndex].ItemId
+                : listItemIndex;
+            result.Add(new ItemInspectionRowPosition(listItemIndex, trueItemId, raw[i].X, raw[i].Y, rowHeight));
         }
 
         return result;
@@ -664,6 +676,11 @@ public unsafe partial class GuiInteractionService(IGameGui gameGui, IAddonLifecy
         var addon = (AtkUnitBase*)gameGui.GetAddonByName(addonName).Address;
         return addon != null && addon->IsVisible;
     }
+
+    // "ItemDetail" and "Tooltip" are the native hover-tooltip addons (item and action/status/generic
+    // respectively); plugin ImGui draws always composite on top of the game's own UI layer, so
+    // overlays must self-hide while any of these is up rather than rely on z-order.
+    public bool IsAnyTooltipVisible() => IsAddonVisible("ItemDetail") || IsAddonVisible("Tooltip");
 
     // Screen-space position/size of a native addon window, for positioning our own ImGui overlays
     // next to it (e.g. a quick-action panel beside the appraising window).

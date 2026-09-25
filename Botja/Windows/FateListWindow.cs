@@ -3,7 +3,6 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Plugin.Services;
-using Lumina.Excel.Sheets;
 using Ocelot.Lifecycle;
 using Ocelot.Windows;
 using System.Collections.Generic;
@@ -22,7 +21,8 @@ public partial class FateListWindow(
     GuiInteractionService guiInteract,
     CeSignupService ceSignup,
     CombatControlService combatControl,
-    AutoModeService autoMode
+    AutoModeService autoMode,
+    HostileDetectionService hostileDetection
 ) : OcelotWindow("Cant be Bozja'ed"), IOnLoad, IOnTerritoryChanged, IMainWindow
 {
     // Bozjan Southern Front and Zadnor — auto-open the window on entering these zones.
@@ -77,14 +77,6 @@ public partial class FateListWindow(
 
         ImGui.Separator();
 
-        ImGui.TextUnformatted("Appraising:");
-        if (ImGui.Button("Start appraising"))
-            guiInteract.StartItemInspectionAutomation();
-        ImGui.SameLine();
-        if (ImGui.Button("Stop appraising"))
-            guiInteract.StopItemInspectionAutomation();
-        ImGui.TextUnformatted(guiInteract.ItemInspectionAutomationStatus);
-
         if (ImGui.Button("Start field note exchange"))
             guiInteract.StartGenericListAutomation("SkyIslandExchange2", 13);
         ImGui.SameLine();
@@ -104,20 +96,30 @@ public partial class FateListWindow(
 
         if (ceSignup.TryFindRecruitingEvent(out var recruitingCeId))
         {
-            ImGui.TextUnformatted($"Recruiting critical engagement: {ceSignup.GetCeName(recruitingCeId)} (ID {recruitingCeId})");
+            ImGui.TextUnformatted($"Recruiting CE: {ceSignup.GetCeName(recruitingCeId)} (ID {recruitingCeId})");
             ImGui.SameLine();
             using (ImRaii.Disabled(ceSignup.IsCeBlacklisted(recruitingCeId)))
             {
-                if (ImGui.Button("Ignore this critical engagement##ceblacklist"))
+                if (ImGui.Button("Blacklist this CE##ceblacklist"))
                     ceSignup.BlacklistCe(recruitingCeId);
             }
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Do not join this critical engagement automatically again");
+                ImGui.SetTooltip("Never auto-join this CE again");
         }
 
         ImGui.Separator();
 
-        if (ImGui.Button(autoMode.IsRunning ? "Stop automatic mode" : "Start automatic mode"))
+        if (ImGui.Button(combatControl.ManualEnabled ? "Stop Combat AI" : "Start Combat AI"))
+        {
+            if (combatControl.ManualEnabled)
+                combatControl.StopManualCombat();
+            else
+                combatControl.StartManualCombat();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Force-enable the selected combat AI right now, regardless of Auto Mode/FATE/CE state");
+
+        if (ImGui.Button(autoMode.IsRunning ? "Stop Auto Mode" : "Start Auto Mode"))
         {
             if (autoMode.IsRunning)
                 autoMode.Stop();
@@ -125,12 +127,13 @@ public partial class FateListWindow(
                 autoMode.Start();
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Travel to and fight the next FATE automatically, joining recruiting critical engagements first");
+            ImGui.SetTooltip("Continuously travel to and fight the next FATE, joining recruiting CEs first");
         ImGui.TextUnformatted(autoMode.Status);
 
         if (nav.DebugPhase != "None" && !string.IsNullOrEmpty(nav.DebugPendingDestinationName))
-            ImGui.TextUnformatted($"Travelling to FATE: {nav.DebugPendingDestinationName}");
+            ImGui.TextUnformatted($"Going to fate: {nav.DebugPendingDestinationName}");
 
+        RenderHostileStatus();
         RenderDebugInfo();
 
         ImGui.Separator();
@@ -142,14 +145,14 @@ public partial class FateListWindow(
         }
 
         ImGui.Columns(8, "fates", true);
-        ImGui.TextUnformatted("Name");     ImGui.NextColumn();
-        ImGui.TextUnformatted("ID");       ImGui.NextColumn();
-        ImGui.TextUnformatted("Sector");   ImGui.NextColumn();
+        ImGui.TextUnformatted("Name"); ImGui.NextColumn();
+        ImGui.TextUnformatted("ID"); ImGui.NextColumn();
+        ImGui.TextUnformatted("Sector"); ImGui.NextColumn();
         ImGui.TextUnformatted("Progress"); ImGui.NextColumn();
-        ImGui.TextUnformatted("Time left"); ImGui.NextColumn();
-        ImGui.TextUnformatted("Travel time"); ImGui.NextColumn();
-        ImGui.TextUnformatted("Actions");  ImGui.NextColumn();
-        ImGui.TextUnformatted("");         ImGui.NextColumn();
+        ImGui.TextUnformatted("Time"); ImGui.NextColumn();
+        ImGui.TextUnformatted("ETA"); ImGui.NextColumn();
+        ImGui.TextUnformatted("Go"); ImGui.NextColumn();
+        ImGui.TextUnformatted(""); ImGui.NextColumn();
         ImGui.Separator();
 
         int i = 0;
@@ -163,14 +166,12 @@ public partial class FateListWindow(
             var sector = fatePriority.GetSector(fate.Position);
 
             using (ImRaii.PushColor(ImGuiCol.Text, isBlacklisted ? 0xFF909090 : 0xFFFFFFFF))
-            {
-                ImGui.TextUnformatted(isBlacklisted ? $"[Blacklisted] {fate.Name}" : fate.Name.ToString()); ImGui.NextColumn();
-                ImGui.TextUnformatted(fatePriority.GetFateTemplateId(fate).ToString()); ImGui.NextColumn();
-                ImGui.TextUnformatted(((int)sector).ToString()); ImGui.NextColumn();
-                ImGui.TextUnformatted($"{fate.Progress}%");   ImGui.NextColumn();
-                ImGui.TextUnformatted(time);                  ImGui.NextColumn();
-                ImGui.TextUnformatted(etaText);               ImGui.NextColumn();
-            }
+                ImGui.TextUnformatted(fate.Name.ToString()); ImGui.NextColumn();
+            ImGui.TextUnformatted(fatePriority.GetFateTemplateId(fate).ToString()); ImGui.NextColumn();
+            ImGui.TextUnformatted(((int)sector).ToString()); ImGui.NextColumn();
+            ImGui.TextUnformatted($"{fate.Progress}%"); ImGui.NextColumn();
+            ImGui.TextUnformatted(time); ImGui.NextColumn();
+            ImGui.TextUnformatted(etaText); ImGui.NextColumn();
 
 
             // Walk button
@@ -197,7 +198,7 @@ public partial class FateListWindow(
                 }
             }
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip($"Automatically navigate to {fate.Name} (return, teleport, then walk)");
+                ImGui.SetTooltip($"Auto-navigate to {fate.Name} (teleport → walk)");
 
             ImGui.NextColumn();
 
@@ -223,4 +224,47 @@ public partial class FateListWindow(
 
         ImGui.Columns(1);
     }
+
+    private void RenderHostileStatus()
+    {
+        var hostiles = hostileDetection.GetNearbyHostiles();
+        if (hostiles.Count == 0)
+            return;
+
+        bool underAttack = hostileDetection.IsPlayerUnderAttack();
+        using (ImRaii.PushColor(ImGuiCol.Text, underAttack ? 0xFF0000FF : 0xFFFFAA00))
+            ImGui.TextUnformatted($"Hostile NPCs nearby: {hostiles.Count}{(underAttack ? " (UNDER ATTACK!)" : string.Empty)}");
+
+        var nonTargeting = hostiles.Where(hostile => !hostile.IsTargetingPlayer).ToList();
+        if (!ImGui.CollapsingHeader($"Nearby Hostile NPCs ({nonTargeting.Count})"))
+            return;
+
+        if (!ImGui.BeginTable("hostiles", 5, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg))
+            return;
+
+        ImGui.TableSetupColumn("Name");
+        ImGui.TableSetupColumn("Distance");
+        ImGui.TableSetupColumn("Rank");
+        ImGui.TableSetupColumn("HP");
+        ImGui.TableSetupColumn("Position");
+        ImGui.TableHeadersRow();
+
+        foreach (var hostile in nonTargeting)
+        {
+            ImGui.TableNextRow();
+            ImGui.TableSetColumnIndex(0);
+            ImGui.TextUnformatted(hostile.Name);
+            ImGui.TableSetColumnIndex(1);
+            ImGui.TextUnformatted($"{hostile.DistanceYalms:F1}y");
+            ImGui.TableSetColumnIndex(2);
+            ImGui.TextUnformatted(hostile.Rank.ToString());
+            ImGui.TableSetColumnIndex(3);
+            ImGui.TextUnformatted($"{hostile.CurrentHp}/{hostile.MaxHp}");
+            ImGui.TableSetColumnIndex(4);
+            ImGui.TextUnformatted($"({hostile.Position.X:F0}, {hostile.Position.Z:F0})");
+        }
+
+        ImGui.EndTable();
+    }
+
 }
