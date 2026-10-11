@@ -21,6 +21,8 @@ public interface IPluginConfig
     BlacklistConfig Blacklist { get; }
 
     HostileDetectionConfig HostileDetection { get; }
+
+    FollowConfig Follow { get; }
 }
 
 public sealed class PluginConfig : IPluginConfig, IPluginConfiguration
@@ -39,6 +41,8 @@ public sealed class PluginConfig : IPluginConfig, IPluginConfiguration
 
     public HostileDetectionConfig HostileDetection { get; set; } = new();
 
+    public FollowConfig Follow { get; set; } = new();
+
     public void HydrateMissingSections()
     {
         Navigation ??= new();
@@ -47,11 +51,13 @@ public sealed class PluginConfig : IPluginConfig, IPluginConfiguration
         Combat ??= new();
         Blacklist ??= new();
         HostileDetection ??= new();
+        Follow ??= new();
         ItemInspection.SkipItemIds ??= [];
         Blacklist.FateIds ??= [];
         Blacklist.CeEventIds ??= [];
         Combat.SelectedAis ??= [];
         Combat.SelectedBossModProfiles ??= [];
+        Follow.FateIds ??= [];
     }
 }
 
@@ -80,11 +86,11 @@ public sealed class FatePriorityConfig : IAutoConfig
     [EnumSelect<FateSectorPreference>]
     public FateSectorPreference PreferredSector { get; set; } = FateSectorPreference.Any;
 
-    [FloatRange(0f, 100f)]
-    public float PreferredSectorBonus { get; set; } = 20f;
-
     [Checkbox]
-    public bool ExcludeUnreachable { get; set; } = true;
+    public bool LimitToPreferredSector { get; set; } = false;
+
+    [FloatRange(-10f, 10f)]
+    public float PreferredSectorWeight { get; set; } = 0.2f;
 
     // FATEs with progress above this are never picked as auto-navigate targets.
     [FloatRange(0f, 100f)]
@@ -128,23 +134,50 @@ public sealed class BlacklistConfig : IAutoConfig
     public HashSet<uint> CeEventIds { get; set; } = [];
 }
 
+// Fate template IDs (not per-instance runtime IDs) known to chain into a follow-up FATE at the
+// same spot — Auto Mode waits there after one of these finishes instead of moving on immediately.
+public sealed class FollowConfig : IAutoConfig
+{
+    public HashSet<uint> FateIds { get; set; } = [];
+
+    [FloatRange(10f, 300f)]
+    public float WaitSeconds { get; set; } = 90f;
+
+    [FloatRange(5f, 100f)]
+    public float RadiusYalms { get; set; } = 30f;
+}
+
 public sealed class HostileDetectionConfig : IAutoConfig
 {
     // Maximum distance at which hostile NPCs are tracked.
     [FloatRange(5f, 200f)]
     public float DetectionRadiusYalms { get; set; } = 100f;
 
-    // Distance considered unsafe around a hostile when checking a position.
-    [FloatRange(5f, 100f)]
-    public float DangerRadiusYalms { get; set; } = 25f;
-
     // Detour around hostiles blocking the path instead of walking straight through them.
     [Checkbox]
     public bool EnableNavmeshAvoidance { get; set; } = true;
 
-    // How far to the side of a blocking hostile to route the detour.
-    [FloatRange(1f, 30f)]
-    public float AvoidanceClearanceYalms { get; set; } = 8f;
+    // Omnidirectional aggro range for Sound-type mobs — anything closer than this triggers them
+    // regardless of facing.
+    [FloatRange(5f, 30f)]
+    public float SoundAggroRangeYalms { get; set; } = 12f;
+
+    // Extra buffer added on top of every sight/sound obstacle to account for mobs wandering/turning
+    // between replans.
+    [FloatRange(0f, 10f)]
+    public float AvoidanceSafetyMarginYalms { get; set; } = 1f;
+
+    // Minimum distance always kept from a hostile's own position regardless of aggro type/facing —
+    // a Sight-type mob's cone only blocks its front, so without this the path could otherwise brush
+    // right past its side/back at near-zero range, which "passes by" safely but looks/feels wrong.
+    [FloatRange(0f, 15f)]
+    public float AvoidancePersonalSpaceYalms { get; set; } = 5f;
+
+    // How far beyond an obstacle's real aggro radius still counts as "worth avoiding when the extra
+    // detour distance is cheap" — the knob for how wide a berth routes prefer to give hostiles when
+    // it's free to do so, versus only barely clearing their edge.
+    [FloatRange(0f, 20f)]
+    public float AvoidanceComfortDistanceYalms { get; set; } = 6f;
 }
 
 

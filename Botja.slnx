@@ -2,7 +2,6 @@
   <Folder Name="/deps/Ocelot/">
     <Project Path="deps/Ocelot/Ocelot.Chain/Ocelot.Chain.csproj" />
     <Project Path="deps/Ocelot/Ocelot.ECommons/Ocelot.ECommons.csproj" />
-    <Project Path="deps/Ocelot/Ocelot.Mechanic/Ocelot.Mechanic.csproj" />
     <Project Path="deps/Ocelot/Ocelot.Pathfinding/Ocelot.Pathfinding.csproj" />
     <Project Path="deps/Ocelot/Ocelot.Pictomancy/Ocelot.Pictomancy.csproj" />
     <Project Path="deps/Ocelot/Ocelot.Rotation/Ocelot.Rotation.csproj" />

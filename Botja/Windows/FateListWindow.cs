@@ -17,6 +17,7 @@ public partial class FateListWindow(
     IAetheryteList aetheryteList,
     IClientState clientState,
     ITargetManager targets,
+    IObjectTable objects,
     IConfigWindow configWindow,
     GuiInteractionService guiInteract,
     CeSignupService ceSignup,
@@ -26,7 +27,7 @@ public partial class FateListWindow(
 ) : OcelotWindow("Cant be Bozja'ed"), IOnLoad, IOnTerritoryChanged, IMainWindow
 {
     // Bozjan Southern Front and Zadnor — auto-open the window on entering these zones.
-    private static readonly HashSet<uint> BozjaZones = [920, 975];
+    internal static readonly HashSet<uint> BozjaZones = [920, 975];
 
     public void OnLoad()
     {
@@ -76,13 +77,6 @@ public partial class FateListWindow(
             ImGui.SetTooltip("Auto-navigate to the highest-priority FATE");
 
         ImGui.Separator();
-
-        if (ImGui.Button("Start field note exchange"))
-            guiInteract.StartGenericListAutomation("SkyIslandExchange2", 13);
-        ImGui.SameLine();
-        if (ImGui.Button("Stop field note exchange"))
-            guiInteract.StopGenericListAutomation();
-        ImGui.TextUnformatted(guiInteract.GenericListAutomationStatus);
 
         if (ImGui.Button(ceSignup.IsRunning ? "Stop joining critical engagements" : "Join a recruiting critical engagement"))
         {
@@ -159,16 +153,17 @@ public partial class FateListWindow(
         foreach (var fate in fatePriority.GetSortedFates(fateTable))
         {
             var isBlacklisted = fatePriority.IsBlacklisted(fate);
+            var isFollowFate = fatePriority.IsFollowFate(fate);
             var rem = fate.TimeRemaining;
             var time = rem > 0 ? $"{rem / 60:D2}:{rem % 60:D2}" : "--:--";
             var eta = nav.EstimateTravelSeconds(fate.Position);
             var etaText = $"{(int)eta / 60:D2}:{(int)eta % 60:D2}";
-            var sector = fatePriority.GetSector(fate.Position);
+            var sector = fatePriority.GetSector(fate);
 
             using (ImRaii.PushColor(ImGuiCol.Text, isBlacklisted ? 0xFF909090 : 0xFFFFFFFF))
                 ImGui.TextUnformatted(fate.Name.ToString()); ImGui.NextColumn();
             ImGui.TextUnformatted(fatePriority.GetFateTemplateId(fate).ToString()); ImGui.NextColumn();
-            ImGui.TextUnformatted(((int)sector).ToString()); ImGui.NextColumn();
+            ImGui.TextUnformatted(sector.HasValue ? ((int)sector.Value).ToString() : "--"); ImGui.NextColumn();
             ImGui.TextUnformatted($"{fate.Progress}%"); ImGui.NextColumn();
             ImGui.TextUnformatted(time); ImGui.NextColumn();
             ImGui.TextUnformatted(etaText); ImGui.NextColumn();
@@ -235,11 +230,10 @@ public partial class FateListWindow(
         using (ImRaii.PushColor(ImGuiCol.Text, underAttack ? 0xFF0000FF : 0xFFFFAA00))
             ImGui.TextUnformatted($"Hostile NPCs nearby: {hostiles.Count}{(underAttack ? " (UNDER ATTACK!)" : string.Empty)}");
 
-        var nonTargeting = hostiles.Where(hostile => !hostile.IsTargetingPlayer).ToList();
-        if (!ImGui.CollapsingHeader($"Nearby Hostile NPCs ({nonTargeting.Count})"))
+        if (!ImGui.CollapsingHeader($"Nearby Hostile NPCs ({hostiles.Count})"))
             return;
 
-        if (!ImGui.BeginTable("hostiles", 5, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg))
+        if (!ImGui.BeginTable("hostiles", 8, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg))
             return;
 
         ImGui.TableSetupColumn("Name");
@@ -247,9 +241,12 @@ public partial class FateListWindow(
         ImGui.TableSetupColumn("Rank");
         ImGui.TableSetupColumn("HP");
         ImGui.TableSetupColumn("Position");
+        ImGui.TableSetupColumn("DataId");
+        ImGui.TableSetupColumn("AggroType");
+        ImGui.TableSetupColumn("FateId");
         ImGui.TableHeadersRow();
 
-        foreach (var hostile in nonTargeting)
+        foreach (var hostile in hostiles)
         {
             ImGui.TableNextRow();
             ImGui.TableSetColumnIndex(0);
@@ -262,6 +259,12 @@ public partial class FateListWindow(
             ImGui.TextUnformatted($"{hostile.CurrentHp}/{hostile.MaxHp}");
             ImGui.TableSetColumnIndex(4);
             ImGui.TextUnformatted($"({hostile.Position.X:F0}, {hostile.Position.Z:F0})");
+            ImGui.TableSetColumnIndex(5);
+            ImGui.TextUnformatted(hostile.DataId.ToString());
+            ImGui.TableSetColumnIndex(6);
+            ImGui.TextUnformatted(hostile.AggroType.ToString());
+            ImGui.TableSetColumnIndex(7);
+            ImGui.TextUnformatted(hostile.FateId == 0 ? "-" : hostile.FateId.ToString());
         }
 
         ImGui.EndTable();

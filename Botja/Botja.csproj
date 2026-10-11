@@ -14,7 +14,6 @@
     <ProjectReference Include="..\deps\Ocelot\Ocelot.UI\Ocelot.UI.csproj" />
     <ProjectReference Include="..\deps\Ocelot\Ocelot.ECommons\Ocelot.ECommons.csproj" />
     <ProjectReference Include="..\deps\Ocelot\Ocelot.Chain\Ocelot.Chain.csproj" />
-    <ProjectReference Include="..\deps\Ocelot\Ocelot.Mechanic\Ocelot.Mechanic.csproj" />
     <ProjectReference Include="..\deps\Ocelot\Ocelot.Pathfinding\Ocelot.Pathfinding.csproj" />
     <ProjectReference Include="..\deps\Ocelot\Ocelot.Rotation\Ocelot.Rotation.csproj" />
     <ProjectReference Include="..\deps\Ocelot\Ocelot.Pictomancy\Ocelot.Pictomancy.csproj" />

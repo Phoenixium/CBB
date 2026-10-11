@@ -3,13 +3,23 @@
     The 'dev' Dalamud folder is populated by launching FFXIV with Dalamud.
     Until then, search installed versioned folders so assemblies like
     FFXIVClientStructs.dll resolve without hardcoding a Dalamud version.
+    Also covers the case where 'dev' exists but is stale/incomplete (missing
+    newer companion assemblies FFXIVClientStructs.dll now depends on, e.g.
+    InteropGenerator.Runtime.dll) by checking those companions too.
   -->
-  <ItemGroup Condition="!Exists('$(DalamudLibPath)FFXIVClientStructs.dll')">
+  <PropertyGroup>
+    <_DalamudDevIncomplete Condition="!Exists('$(DalamudLibPath)FFXIVClientStructs.dll')">true</_DalamudDevIncomplete>
+    <_DalamudDevIncomplete Condition="!Exists('$(DalamudLibPath)InteropGenerator.Runtime.dll')">true</_DalamudDevIncomplete>
+    <_DalamudDevIncomplete Condition="!Exists('$(DalamudLibPath)Dalamud.Bindings.ImPlot.dll')">true</_DalamudDevIncomplete>
+    <_DalamudDevIncomplete Condition="!Exists('$(DalamudLibPath)Dalamud.Bindings.ImGuizmo.dll')">true</_DalamudDevIncomplete>
+    <_DalamudDevIncomplete Condition="!Exists('$(DalamudLibPath)Microsoft.Extensions.ObjectPool.dll')">true</_DalamudDevIncomplete>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(_DalamudDevIncomplete)' == 'true'">
     <_DalamudFallbackAssembly
       Include="$(APPDATA)\XIVLauncher\addon\Hooks\*\FFXIVClientStructs.dll"
       Exclude="$(APPDATA)\XIVLauncher\addon\Hooks\dev\FFXIVClientStructs.dll" />
   </ItemGroup>
-  <PropertyGroup Condition="!Exists('$(DalamudLibPath)FFXIVClientStructs.dll')">
+  <PropertyGroup Condition="'$(_DalamudDevIncomplete)' == 'true'">
     <AssemblySearchPaths>$(AssemblySearchPaths);@(_DalamudFallbackAssembly->'%(RootDir)%(Directory)')</AssemblySearchPaths>
   </PropertyGroup>
 </Project>

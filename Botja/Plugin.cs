@@ -83,9 +83,11 @@ public sealed class Plugin(IDalamudPluginInterface pluginInterface, IPluginLog l
         services.AddSingleton<TranslationLoader>();
         services.AddSingleton<Windows.FateListWindow>();
         services.AddSingleton<Windows.AppraisingOverlayWindow>();
+        services.AddSingleton<Windows.FieldNoteExchangeOverlayWindow>();
         // IWindow isn't auto-wired like the Lifecycle hooks (IOnUpdate etc.) — register explicitly
         // or the WindowManager never adds it to the WindowSystem and it's never drawn.
         services.AddSingleton<IWindow>(sp => sp.GetRequiredService<Windows.AppraisingOverlayWindow>());
+        services.AddSingleton<IWindow>(sp => sp.GetRequiredService<Windows.FieldNoteExchangeOverlayWindow>());
         // Registering as IMainWindow (not IWindow) so it replaces Ocelot's default empty main window.
         services.AddSingleton<IMainWindow>(sp => sp.GetRequiredService<Windows.FateListWindow>());
     }

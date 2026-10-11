@@ -26,11 +26,11 @@
         "preferred_sector": {
           "label": "Preferred sector"
         },
-        "preferred_sector_bonus": {
-          "label": "Preferred sector bonus"
+        "limit_to_preferred_sector": {
+          "label": "Limit FATEs to this sector only"
         },
-        "exclude_unreachable": {
-          "label": "Skip unreachable FATEs"
+        "preferred_sector_weight": {
+          "label": "Preferred sector importance"
         }
       }
     },
@@ -47,6 +47,14 @@
       "fields": {
         "auto_control_enabled": {
           "label": "Automatically control combat rotation"
+        }
+      }
+    },
+    "auto_mode": {
+      "label": "Auto Mode",
+      "fields": {
+        "only_critical_engagements": {
+          "label": "Only do Critical Engagements"
         }
       }
     },

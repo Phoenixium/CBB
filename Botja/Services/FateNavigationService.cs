@@ -63,13 +63,22 @@ public class FateNavigationService(
     // From BOCCHI NavigationConstants
     private const float MaxDirectWalkDistance = 80f;
     private const float EventArrivalRadius = 10f;
-    private const float ShardInteractRadius = 3.5f;
+    private const float ShardInteractRadius = 3f;
     // Wider than ShardInteractRadius — matches BOCCHI's IsAlreadyAtAetheryte arrivedRadius
     // (post-TP landings and menu-open range are often several yards from the crystal).
     private const float ArrivedAtAetheryteRadius = 12f;
     // These are wall-clock durations (ms), NOT frame counts — Update() is not guaranteed to run at
     // 60fps (observed real rates are much higher), so a tick-count timeout would fire far too early.
-    private const long WalkToShardTimeoutMs = 30_000; // ~30s safety timeout
+    private const long WalkToShardTimeoutMs = 30_000; // floor for short hops
+    // A flat timeout doesn't scale with actual distance — a shard genuinely far away (and/or walked
+    // on foot rather than mounted) can still be making real progress well past 30s. Timeout instead
+    // scales with the distance measured at phase entry, using a conservative unmounted-speed floor so
+    // it can't be gamed into a huge cap by a bad reading, plus a flat overhead buffer for mount-cast/
+    // pathing startup. Never smaller than WalkToShardTimeoutMs so short hops keep the original bound.
+    private const float MinShardWalkSpeedYalms = 6f;
+    private const long WalkToShardTimeoutBufferMs = 15_000;
+    // How often a skipped/failed mount attempt gets retried during travel (see TryMount).
+    private const long MountRetryIntervalMs = 3_000;
     private const long TeleportStartTimeoutMs = 3_000; // matches BOCCHI's WaitUntilTeleportStarted
     private const long TeleportArriveTimeoutMs = 20_000; // matches BOCCHI's WaitUntilArrived
     // Lifestream's busy/jump/betweenAreas signals can all fail to ever flip when a hop silently
@@ -99,9 +108,14 @@ public class FateNavigationService(
     private static readonly Color ShardPathColor = new(0.3f, 0.6f, 1f); // blue — walking to source shard
     private static readonly Color TeleportWaitColor = new(1f, 0.8f, 0.1f); // yellow — teleport in progress
     private static readonly Color FinalPathColor = new(0.2f, 1f, 0.3f); // green — final walk to goal
+    private static readonly Color AvoidanceSteerColor = new(1f, 0.1f, 0.8f); // magenta — hostile-avoidance steering target
 
     private const long HeartbeatIntervalMs = 1_000; // log a state snapshot this often during waits
     private const long WalkToDestinationTimeoutMs = 60_000; // ~60s safety timeout
+    // Below this, an "arrived" WalkingToDestination phase almost certainly means the player was
+    // already standing at the destination when navigation started (e.g. Auto Mode starting right at
+    // a FATE) rather than having actually travelled there — don't dismount for that trivial case.
+    private const long ArrivalDismountMinPhaseElapsedMs = 500;
     // vnav.PathfindAndMoveCloseTo can silently no-op (e.g. called before IsNavmeshReady flips, or a
     // dropped IPC call), leaving Pathfinding/Running both false and the player frozen for the whole
     // phase timeout. Re-issue the move if vnav still looks idle this long after we last asked it to go.
@@ -114,9 +128,56 @@ public class FateNavigationService(
     // BOCCHI's PathfinderConfig.FloorSnapExtents default. Kept small since this only needs to find
     // the floor directly beneath the stored X/Z, not search sideways for a different spot.
     private const float MeshSnapHalfExtentXZ = 5f;
+    // Wider snap radius specifically for avoidance waypoints — these are COMPUTED points (the
+    // obstacle planner has zero navmesh/terrain awareness), not curated data like shard coordinates,
+    // so they can legitimately land a few yalms off the nearest real walkable polygon.
+    private const float AvoidanceMeshSnapHalfExtentXZ = 15f;
+    // vnav's plain floor query only searches a narrow/implicit height range around the GIVEN Y — the
+    // obstacle planner's linearly-interpolated waypoint Y can be meaningfully off the REAL ground
+    // height across Bozja's varied terrain (confirmed directly: a waypoint was computed floating in
+    // mid-air, so the floor query genuinely couldn't find the real ground because of the bad Y guess,
+    // not because no ground existed nearby). Used as a wide vertical fallback search specifically for
+    // avoidance waypoints, never for curated positions (shard/FATE coordinates), whose Y is already
+    // trustworthy.
+    private const float AvoidanceMeshSnapHalfExtentY = 50f;
+    // Confirmed via a real repro log: with the wide 15y avoidance search radius, vnav.FindPointOnFloor
+    // can return a "found" point whose X/Z sits ~15y away from the query — not just a corrected Y at
+    // the same X/Z as the comment above assumes — silently relocating a carefully-planned detour
+    // waypoint somewhere unrelated (in that log, right back toward the obstacles it was meant to
+    // avoid). Any result drifting further than this is treated the same as "no polygon found".
+    private const float MaxMeshSnapDriftYalms = 5f;
     private const float AvoidanceFinalApproachBuffer = 20f;
-    private const long AvoidanceCooldownMs = 2_000;
-    private const int MaxAvoidanceAttempts = 3;
+    // Upper bound on how long a plan is trusted without re-checking it against live hostile
+    // data — only actually rebuilds if HostilesChangedSincePlan says something real moved/turned
+    // (see below); AnyPlanSegmentBlocked (checked every tick) still forces an early replan
+    // regardless of this timer if a mob wanders/turns into the currently-followed path.
+    private const long AvoidanceReplanIntervalMs = 1_500;
+    // Below this much movement/turning since the last plan, a hostile is treated as unchanged —
+    // rebuilding the whole visibility graph for sub-yalm wander would just reshuffle an equally
+    // valid route (tie-breaking noise) and restart movement for no real benefit.
+    private const float AvoidanceReplanMoveThresholdYalms = 2f;
+    private const float AvoidanceReplanFacingThresholdRadians = 0.26f; // ~15 degrees
+    // Arrival radius for an intermediate avoidance waypoint — tighter than the real destination's
+    // arrival range so the character actually rounds each corner instead of cutting through it.
+    // Deliberately kept BELOW HostileDetectionConfig.AvoidanceSafetyMarginYalms's default (2.5y):
+    // this value is also passed straight through as vnav's own arrival tolerance for that hop
+    // (PathfindAndMoveCloseTo stops once within this distance of the target), so if it were EQUAL
+    // to or larger than the hard clearance margin, vnav could legitimately stop short in a way that
+    // eats into (or eliminates) the very clearance the waypoint was computed to guarantee — reported
+    // by the user as still occasionally clipping a Sound mob's circle despite a seemingly-clear plan.
+    private const float AvoidanceWaypointArrivalRadius = 2f;
+    // Skip re-issuing StartMove unless the current waypoint moved meaningfully since it was last
+    // issued — filters out tiny per-replan drift so movement stays smooth instead of restarting
+    // vnav's pathfind for every negligible adjustment.
+    private const float AvoidanceWaypointChangeThreshold = 3f;
+    // Hard aggro limits mean "no safe route exists" is a real possible outcome, not just an edge
+    // case — require this many consecutive ms of failed replans (not a single bad frame) before
+    // surfacing IsAvoidanceStuck and stopping movement, so one flaky scan tick can't false-trigger it.
+    private const long AvoidanceStuckConfirmMs = 1_000;
+    // Bounds retries of a single avoidance waypoint vnav genuinely can't reach (confirmed via real
+    // repro logs of the removed mesh-snap pre-check) — matches MaxMovementStallRetries' role for the
+    // non-avoidance phases, just scoped to one waypoint instead of a whole phase.
+    private const int MaxAvoidanceStallRetries = 3;
 
     private TeleportPhase phase;
     private Vector3 pendingDestination;
@@ -126,6 +187,9 @@ public class FateNavigationService(
     private Vector3 pendingPreTeleportPos;
     private int phaseTicks; // diagnostic Update() call counter only — NOT a reliable time unit, see timeouts above
     private long phaseStartMs;
+    private long shardWalkTimeoutMs; // distance-scaled timeout for the current WalkingToSourceShard phase
+    private long nextMountAttemptMs; // throttles repeated TryMount attempts during travel
+    private bool wasInCombat; // detects the InCombat falling edge so mounting resumes immediately, not after the throttle
     private long lastHeartbeatMs;
     private long lastMoveIssuedMs;
     private int movementStallRetries;
@@ -137,10 +201,28 @@ public class FateNavigationService(
     // would loop through fight/flee forever and never actually get us there.
     private bool combatResolveAttempted;
     private bool resumingAfterCombatResolve;
-    private bool avoidingHostile;
-    private Vector3 avoidanceTarget;
-    private long lastAvoidanceMs;
-    private int avoidanceAttempts;
+    // Current detour route (real world XZ waypoints, last one always the real destination) — null
+    // means "no obstacle currently requires a detour". Driven waypoint-by-waypoint via
+    // vnav.PathfindAndMoveCloseTo — vnav.FollowPath ("Path.MoveTo", whole polyline in one call) was
+    // tried twice this session and confirmed not to actually move the character either time; don't
+    // reintroduce it without new evidence it's been fixed on vnavmesh's side.
+    private List<Vector3>? plannedAvoidancePath;
+    private int avoidanceWaypointIndex;
+    private Vector3 lastIssuedAvoidanceWaypoint = new(float.MaxValue, 0f, float.MaxValue);
+    private int lastIssuedAvoidanceWaypointIndex = -1;
+    private long lastAvoidancePlanMs;
+    // 0 while replanning is succeeding; set to the first failure's timestamp once it starts failing,
+    // so IsAvoidanceStuck only fires after AvoidanceStuckConfirmMs of sustained failure, not one blip.
+    private long avoidanceNoPathSinceMs;
+    // Consecutive stalled retries of the CURRENT avoidance waypoint — reset whenever the waypoint
+    // itself changes (a new waypoint deserves a fresh chance), not on every replan.
+    private int avoidanceStallRetries;
+    // Hostile position/facing snapshot from the last successful plan, keyed by ObjectId — lets the
+    // timer-based replan check skip rebuilding when nothing actually moved/turned meaningfully.
+    private Dictionary<ulong, (Vector3 Position, float Facing)> lastPlanHostileSnapshot = [];
+    // ObjectIds the player is currently standing inside the REAL (unpadded) aggro shape of — used
+    // only to log once on entry instead of spamming every tick while still inside.
+    private HashSet<ulong> hostilesInsideZone = [];
 
     private static long NowMs() => Environment.TickCount64;
     private long PhaseElapsedMs => NowMs() - phaseStartMs;
@@ -164,6 +246,10 @@ public class FateNavigationService(
     // True while ResolvingCombat is trying to fight off whatever blocked a teleport — CombatControlService
     // treats this the same as "arrived and fighting" so the rotation plugin is allowed to help clear it.
     public bool IsResolvingCombat => phase == TeleportPhase.ResolvingCombat;
+
+    // True when no route exists that avoids every nearby sight/sound aggro radius — those are hard
+    // limits, so movement is stopped instead of falling back to an unsafe direct walk.
+    public bool IsAvoidanceStuck { get; private set; }
 
     // Smart routing: walk if close, or if walking beats the aethernet route; otherwise walk to the nearest aetheryte, teleport to the shard nearest the destination, then walk in.
     public void AutoNavigate(Vector3 destination, string? destinationName = null)
@@ -272,9 +358,16 @@ public class FateNavigationService(
         phaseStartMs = NowMs();
         movementStallRetries = 0;
 
+        float shardDist = objects.LocalPlayer is { } p ? Dist2D(p.Position, snappedShardPos) : 0f;
+        shardWalkTimeoutMs = Math.Max(WalkToShardTimeoutMs, (long)(shardDist / MinShardWalkSpeedYalms * 1000) + WalkToShardTimeoutBufferMs);
+
         TryMount(snappedShardPos);
-        log.Debug("[FateNav] WalkToShardThenAethernet: walking to shard {ShardPos} (raw {RawShardPos}), phase -> WalkingToSourceShard", snappedShardPos, shardPos);
-        StartMove(snappedShardPos, ShardInteractRadius);
+        log.Debug("[FateNav] WalkToShardThenAethernet: walking to shard {ShardPos} (raw {RawShardPos}, dist {Dist:F1}, timeout {Timeout}ms), phase -> WalkingToSourceShard", snappedShardPos, shardPos, shardDist, shardWalkTimeoutMs);
+        // Goes through avoidance first — a direct unconditional StartMove here would aim the very
+        // first movement command of the journey straight at the raw shard position, bypassing
+        // obstacle-awareness for that one command (avoidance would only take over on the NEXT tick).
+        if (!UpdateHostileAvoidance(snappedShardPos, ShardInteractRadius))
+            StartMove(snappedShardPos, ShardInteractRadius);
     }
 
     // Walk directly, ignoring aethernet (walk button).
@@ -286,7 +379,10 @@ public class FateNavigationService(
         CancelPending();
         TryMount(destination);
         log.Debug("[FateNav] PathTo({Destination}) via vnavmesh", destination);
-        StartMove(destination, EventArrivalRadius);
+        // Goes through avoidance first — see WalkToShardThenAethernet for why the very first movement
+        // command of a journey shouldn't bypass it with a direct unconditional StartMove.
+        if (!UpdateHostileAvoidance(destination, EventArrivalRadius))
+            StartMove(destination, EventArrivalRadius);
         pendingDestination = destination;
         phase = TeleportPhase.WalkingToDestination;
         phaseTicks = 0;
@@ -360,7 +456,8 @@ public class FateNavigationService(
         bool queued;
         try
         {
-            Actions.Unmount.Cast();
+            // No manual dismount here — aethernet teleport works fine while mounted, and forcing one
+            // dismounted the player the instant Auto Mode started if already standing at a shard.
             queued = lifestream.AethernetTeleportByPlaceNameId(shard.Value.PlaceNameId);
         }
         catch (Exception ex)
@@ -404,7 +501,7 @@ public class FateNavigationService(
         SafeStopVnav();
         try
         {
-            Actions.Unmount.Cast();
+            // No manual dismount here — see the matching comment in PathViaAethernet.
             bool queued = lifestream.AethernetTeleportByPlaceNameId(shard.Value.PlaceNameId);
             if (!queued)
                 log.Warning("[FateNav] TeleportToward({Destination}): lifestream.AethernetTeleportByPlaceNameId({PlaceNameId}) returned false", destination, shard.Value.PlaceNameId);
@@ -414,11 +511,11 @@ public class FateNavigationService(
 
     // Always stop prior movement before issuing a new one — matches BOCCHI's PathfindToChain
     // "Stop prior movement" step (Path.Stop alone does not cancel a pending SimpleMove task).
-    private void StartMove(Vector3 destination, float range)
+    private void StartMove(Vector3 destination, float range, float snapHalfExtentXZ = MeshSnapHalfExtentXZ, float snapHalfExtentY = 0f)
     {
         SafeStopVnav();
         lastMoveIssuedMs = NowMs();
-        Vector3 target = SnapToMesh(destination);
+        Vector3 target = TrySnapToMesh(destination, snapHalfExtentXZ, snapHalfExtentY, out Vector3 snapped) ? snapped : destination;
         try
         {
             vnav.PathfindAndMoveCloseTo(target, false, range);
@@ -430,90 +527,395 @@ public class FateNavigationService(
         }
     }
 
+    // Drives the visibility-graph obstacle planner and follows the resulting detour, one waypoint at
+    // a time via vnav.PathfindAndMoveCloseTo (vnav.FollowPath was tried twice this session as a way
+    // to submit the whole polyline in one call and avoid per-corner restarts, but confirmed both
+    // times to never actually move the character — don't retry it without new evidence it's fixed).
+    // Sight/sound aggro radii are hard limits — if no route avoiding every one of them exists, this
+    // stops movement (IsAvoidanceStuck) rather than falling back to an unguarded walk.
     private bool UpdateHostileAvoidance(Vector3 destination, float arrivalRange)
     {
         if (objects.LocalPlayer is not { } currentPlayer)
             return false;
 
+        // Ground-truth check, independent of whether avoidance is even enabled or currently
+        // succeeding — the plain fact a regression here is supposed to prevent.
+        LogHostileZoneEntry(currentPlayer.Position);
+
         if (!hostileDetectionConfig.EnableNavmeshAvoidance)
         {
-            if (avoidingHostile)
-                StartMove(destination, arrivalRange);
-            avoidingHostile = false;
+            ClearAvoidancePlan();
             return false;
         }
 
-        if (Dist2D(currentPlayer.Position, destination) <= arrivalRange + AvoidanceFinalApproachBuffer)
+        Vector3 currentPos = currentPlayer.Position;
+        float remainingDist = Dist2D(currentPos, destination);
+        if (remainingDist <= arrivalRange + AvoidanceFinalApproachBuffer)
         {
-            if (avoidingHostile && Dist2D(currentPlayer.Position, destination) > arrivalRange)
-                StartMove(destination, arrivalRange);
-
-            avoidingHostile = false;
+            ClearAvoidancePlan();
             return false;
         }
 
-        if (avoidingHostile)
+        var relevantHostiles = hostileDetection.GetRouteRelevantHostiles(
+            currentPos, destination, hostileDetectionConfig.SoundAggroRangeYalms, hostileDetectionConfig.AvoidanceSafetyMarginYalms);
+        var obstacles = BuildObstacles(relevantHostiles);
+
+        if (obstacles.Count == 0)
         {
-            if (Dist2D(currentPlayer.Position, avoidanceTarget) <= arrivalRange)
+            // Nothing nearby to avoid — hand back to the caller's own direct StartMove, which has a
+            // tighter/more precise arrival check for the real destination than a detour plan needs.
+            ClearAvoidancePlan();
+            return false;
+        }
+
+        bool noPlanYet = plannedAvoidancePath == null;
+        bool segmentBlocked = !noPlanYet && AnyPlanSegmentBlocked(obstacles);
+        bool timerDue = !noPlanYet && !segmentBlocked && NowMs() - lastAvoidancePlanMs > AvoidanceReplanIntervalMs;
+        bool hostilesMoved = timerDue && HostilesChangedSincePlan(relevantHostiles);
+        bool needsReplan = noPlanYet || segmentBlocked || (timerDue && hostilesMoved);
+
+        if (needsReplan)
+        {
+            // Tags WHY a replan is happening — distinguishes "just building the first plan" from
+            // "an existing route got invalidated" or "periodic recheck found hostiles moved", so a
+            // suspiciously frequent replan cadence (a likely cause of jittery/regressed steering) is
+            // visible in the log instead of just inferred from timestamps.
+            log.Debug("[FateNav] Hostile avoidance: replanning (noPlanYet={NoPlanYet}, segmentBlocked={SegmentBlocked}, hostilesMoved={HostilesMoved})",
+                noPlanYet, segmentBlocked, hostilesMoved);
+            lastAvoidancePlanMs = NowMs();
+            List<Vector3>? path = ObstaclePathPlanner.FindPath(currentPos, destination, obstacles, hostileDetectionConfig.AvoidanceComfortDistanceYalms);
+            if (path == null)
             {
-                avoidingHostile = false;
-                StartMove(destination, arrivalRange);
+                if (avoidanceNoPathSinceMs == 0)
+                    avoidanceNoPathSinceMs = NowMs();
+
+                if (NowMs() - avoidanceNoPathSinceMs > AvoidanceStuckConfirmMs)
+                {
+                    if (!IsAvoidanceStuck)
+                        log.Warning("[FateNav] Hostile avoidance: no safe route to {Destination} clears every nearby aggro radius — stopping instead of risking a pull", destination);
+                    IsAvoidanceStuck = true;
+                    SafeStopVnav();
+                    return true;
+                }
+
+                if (plannedAvoidancePath == null)
+                {
+                    // Never had a safe plan yet — do NOT hand control back to the caller's own
+                    // unguarded StartMove while we can't confirm ANY route clears every nearby
+                    // aggro radius. Reported by the user directly: this let the very first move
+                    // after starting navigation walk straight into a cone, right when avoidance had
+                    // JUST determined the direct path wasn't safe. Hold position and keep retrying
+                    // until either a plan succeeds or the stuck-confirm timeout above fires.
+                    SafeStopVnav();
+                    return true;
+                }
+
+                // Otherwise: a brief blip against an EXISTING, already-good plan (mob mid-turn,
+                // transient scan gap) — fall through and keep following it below rather than
+                // reacting to one single failed replan.
+            }
+            else
+            {
+                avoidanceNoPathSinceMs = 0;
+                IsAvoidanceStuck = false;
+                // A genuinely new plan deserves a fresh chance — without this, a waypoint that kept
+                // recomputing to the same dead value across several replans (each one resetting
+                // IsAvoidanceStuck without resetting this) let the retry count climb indefinitely
+                // across separate stuck-cycles instead of stopping cleanly after MaxAvoidanceStallRetries
+                // each time (confirmed via a real repro log: "stalled 167 times in a row").
+                avoidanceStallRetries = 0;
+                plannedAvoidancePath = path;
+                avoidanceWaypointIndex = 0;
+                SnapshotPlanHostiles(relevantHostiles);
+                // Full route dump — lets an in-game overlay oddity (e.g. an unexpectedly large
+                // number of waypoints) be correlated directly against what was actually computed.
+                log.Debug("[FateNav] Hostile avoidance: (re)planned {Count}-waypoint route around {ObstacleCount} obstacle(s): {Waypoints}",
+                    path.Count, obstacles.Count, string.Join(" -> ", path));
+            }
+        }
+
+        if (plannedAvoidancePath is not { Count: > 0 } plan)
+            return false;
+
+        if (avoidanceWaypointIndex >= plan.Count)
+            avoidanceWaypointIndex = plan.Count - 1;
+
+        if (avoidanceWaypointIndex < plan.Count - 1
+            && Dist2D(currentPos, plan[avoidanceWaypointIndex]) <= AvoidanceWaypointArrivalRadius)
+        {
+            avoidanceWaypointIndex++;
+        }
+
+        Vector3 waypoint = plan[avoidanceWaypointIndex];
+        // Advancing to a genuinely new INDEX in the plan must always count as a change, even if that
+        // waypoint happens to sit close to the previous one (common near an obstacle, where the
+        // planner can't always take a big shortcut) — confirmed as a real repro'd stuck cause: with
+        // only a distance check, a waypoint closer than AvoidanceWaypointChangeThreshold to the last
+        // ISSUED one never got a fresh StartMove at all, so the character just sat idle (vnav already
+        // arrived at the old point) until the full 3s stall timer forced a retry, over and over for
+        // every tightly-packed cluster of waypoints along the route.
+        bool waypointChanged = avoidanceWaypointIndex != lastIssuedAvoidanceWaypointIndex
+            || Dist2D(waypoint, lastIssuedAvoidanceWaypoint) > AvoidanceWaypointChangeThreshold;
+        bool stalled = NowMs() - lastMoveIssuedMs > MovementStallRetryMs && !SafeIsPathfinding() && !SafeIsRunning();
+
+        // Deliberately NOT pre-validating this waypoint against vnav.TryFindPointOnFloor anymore.
+        // Four rounds of real repro logs proved that check was the wrong tool here: vnav's own
+        // PathfindAndMoveCloseTo repeatedly succeeded (full polygon chain, milliseconds) toward
+        // points that TryFindPointOnFloor insisted had "no nearby mesh polygon" — including the
+        // literal FATE/shard destination itself. Every fix built on top of that check (skip dead
+        // waypoints, substitute nearby points, reject far snaps, exclude only the final waypoint)
+        // just chased new self-inflicted failure modes, culminating in the player being completely
+        // frozen in place for 9+ seconds while the same "waypoint has no nearby mesh polygon" spam
+        // repeated every ~15-30ms — even though vnav could clearly path there the whole time.
+        // Trusting vnav's real pathfind (like every non-avoidance move already does) and relying on
+        // the same stall-retry counter used elsewhere in this file is simpler and matches reality.
+        if (waypointChanged)
+            avoidanceStallRetries = 0;
+
+        if (waypointChanged || stalled)
+        {
+            if (stalled && !waypointChanged)
+            {
+                avoidanceStallRetries++;
+                if (avoidanceStallRetries > MaxAvoidanceStallRetries)
+                {
+                    if (!IsAvoidanceStuck)
+                        log.Warning("[FateNav] Hostile avoidance: waypoint {Waypoint} ({Index}/{Count}) stalled {Retries} times in a row — vnav can't reach it, stopping instead of retrying forever",
+                            waypoint, avoidanceWaypointIndex + 1, plan.Count, avoidanceStallRetries);
+                    IsAvoidanceStuck = true;
+                    SafeStopVnav();
+                    return true;
+                }
             }
 
-            return true;
+            lastIssuedAvoidanceWaypoint = waypoint;
+            lastIssuedAvoidanceWaypointIndex = avoidanceWaypointIndex;
+            log.Debug("[FateNav] Hostile avoidance: steering to {Waypoint} ({Index}/{Count}) to clear nearby aggro radii", waypoint, avoidanceWaypointIndex + 1, plan.Count);
+            StartMove(waypoint, AvoidanceWaypointArrivalRadius, AvoidanceMeshSnapHalfExtentXZ, AvoidanceMeshSnapHalfExtentY);
         }
 
-        if (avoidanceAttempts >= MaxAvoidanceAttempts
-            || NowMs() - lastAvoidanceMs < AvoidanceCooldownMs
-            || !hostileDetection.TryGetBlockingHostile(currentPlayer.Position, destination, hostileDetectionConfig.AvoidanceClearanceYalms, out var hostile))
-            return false;
-
-        Vector2 route = new(destination.X - currentPlayer.Position.X, destination.Z - currentPlayer.Position.Z);
-        float routeLength = route.Length();
-        if (routeLength <= 0.01f)
-            return false;
-
-        route /= routeLength;
-        Vector2 toHostile = new(hostile.Position.X - currentPlayer.Position.X, hostile.Position.Z - currentPlayer.Position.Z);
-        float side = route.X * toHostile.Y - route.Y * toHostile.X >= 0f ? -1f : 1f;
-        Vector2 lateral = new(-route.Y * side, route.X * side);
-        Vector2 detour = new Vector2(hostile.Position.X, hostile.Position.Z)
-            + lateral * hostileDetectionConfig.AvoidanceClearanceYalms;
-
-        avoidanceTarget = new Vector3(detour.X, hostile.Position.Y, detour.Y);
-        avoidingHostile = true;
-        avoidanceAttempts++;
-        lastAvoidanceMs = NowMs();
-        log.Debug("[FateNav] Hostile avoidance: detouring around {Name} at {Position} via {Detour}", hostile.Name, hostile.Position, avoidanceTarget);
-        StartMove(avoidanceTarget, arrivalRange);
         return true;
+    }
+
+    private void ClearAvoidancePlan()
+    {
+        plannedAvoidancePath = null;
+        avoidanceWaypointIndex = 0;
+        lastIssuedAvoidanceWaypoint = new Vector3(float.MaxValue, 0f, float.MaxValue);
+        lastIssuedAvoidanceWaypointIndex = -1;
+        avoidanceNoPathSinceMs = 0;
+        avoidanceStallRetries = 0;
+        IsAvoidanceStuck = false;
+        lastPlanHostileSnapshot = [];
+    }
+
+    // True if any hostile the current plan was built around has since moved or turned enough to
+    // matter, or the relevant set itself changed (new one in range, one dropped out) — gates the
+    // periodic timer replan so a static cluster of hostiles doesn't get needlessly rebuilt (and the
+    // followed path restarted) every AvoidanceReplanIntervalMs for no real reason.
+    private bool HostilesChangedSincePlan(IReadOnlyList<HostileDetectionService.HostileNpc> hostiles)
+    {
+        if (hostiles.Count != lastPlanHostileSnapshot.Count)
+            return true;
+
+        foreach (var hostile in hostiles)
+        {
+            if (!lastPlanHostileSnapshot.TryGetValue(hostile.ObjectId, out var prev))
+                return true;
+
+            if (Dist2D(hostile.Position, prev.Position) > AvoidanceReplanMoveThresholdYalms)
+                return true;
+
+            float facingDelta = MathF.Abs(NormalizeAngle(hostile.Facing - prev.Facing));
+            if (facingDelta > AvoidanceReplanFacingThresholdRadians)
+                return true;
+        }
+
+        return false;
+    }
+
+    private void SnapshotPlanHostiles(IReadOnlyList<HostileDetectionService.HostileNpc> hostiles)
+    {
+        lastPlanHostileSnapshot = hostiles.ToDictionary(h => h.ObjectId, h => (h.Position, h.Facing));
+    }
+
+    private static float NormalizeAngle(float radians)
+    {
+        while (radians > MathF.PI) radians -= 2f * MathF.PI;
+        while (radians < -MathF.PI) radians += 2f * MathF.PI;
+        return radians;
+    }
+
+    // Checks the WHOLE stored plan (not just the immediate next leg) against live obstacle data —
+    // a mob wandering/turning could invalidate a segment further along the route, not only the one
+    // currently being walked.
+    private bool AnyPlanSegmentBlocked(IReadOnlyList<PathObstacle> obstacles)
+    {
+        if (obstacles.Count == 0 || plannedAvoidancePath is not { Count: > 1 } plan)
+            return false;
+
+        for (int i = 0; i < plan.Count - 1; i++)
+        {
+            if (ObstaclePathPlanner.IsSegmentBlocked(plan[i], plan[i + 1], obstacles))
+                return true;
+        }
+
+        return false;
+    }
+
+    // Turns each route-relevant hostile into the real obstacle shape(s) for its aggro type — a wedge
+    // for Sight (frontal cone only), a full circle for Sound (omnidirectional) — PLUS a small
+    // always-on personal-space circle for every hostile regardless of type/facing, so a Sight mob's
+    // side/back (outside its cone, otherwise unconstrained) still keeps a comfortable pass-by
+    // distance instead of the path brushing right past its actual position. Magic-type hostiles
+    // never reach this point (already excluded by GetRouteRelevantHostiles).
+    private List<PathObstacle> BuildObstacles(IReadOnlyList<HostileDetectionService.HostileNpc> hostiles)
+    {
+        float margin = hostileDetectionConfig.AvoidanceSafetyMarginYalms;
+        var obstacles = new List<PathObstacle>(hostiles.Count * 2);
+        foreach (var hostile in hostiles)
+        {
+            Vector2 center = new(hostile.Position.X, hostile.Position.Z);
+            switch (hostile.AggroType)
+            {
+                case AggroType.Sound:
+                    obstacles.Add(PathObstacle.Circle(center, hostileDetectionConfig.SoundAggroRangeYalms + margin));
+                    break;
+                case AggroType.Sight:
+                    obstacles.Add(PathObstacle.Wedge(
+                        center, hostile.Facing, HostileDetectionService.FacingConeHalfAngleRadians, HostileDetectionService.FacingConeRangeYalms + margin));
+                    break;
+            }
+
+            if (hostileDetectionConfig.AvoidancePersonalSpaceYalms > 0.01f)
+                obstacles.Add(PathObstacle.Circle(center, hostileDetectionConfig.AvoidancePersonalSpaceYalms));
+        }
+
+        return obstacles;
+    }
+
+    // Logs the moment the player's ACTUAL position enters a hostile's real, UNPADDED aggro trigger
+    // shape (no safety margin/comfort distance applied) — the plain fact hostile avoidance exists to
+    // prevent, checked against every currently-scanned hostile (not just the ones the current plan
+    // considered "route relevant"), so a regression anywhere (bad plan, stalled movement, avoidance
+    // disabled, wrong aggro-type classification, etc.) becomes an unmissable warning in the log
+    // instead of only being visible as an actual in-game pull. Only fires once per entry, not every
+    // tick spent inside, via hostilesInsideZone tracking the entry/exit edge.
+    //
+    // Applies the SAME relevance exclusions as GetRouteRelevantHostiles (already pulled us/engaged
+    // elsewhere/claimed by a FATE) — confirmed via a real repro log full of these warnings that
+    // turned out to be entirely false positives: mobs already fighting something else, mobs that had
+    // already pulled the player long before this navigation even started, and FATE mobs at the
+    // literal destination (which avoidance correctly stopped steering around). None of those are
+    // travel-safety failures, so logging them as "avoidance may have failed" was just noise hiding
+    // the real signal.
+    private void LogHostileZoneEntry(Vector3 currentPos)
+    {
+        var stillInside = new HashSet<ulong>();
+        foreach (var hostile in hostileDetection.GetNearbyHostiles())
+        {
+            if (hostile.IsTargetingPlayer || hostile.IsEngagedElsewhere || hostile.FateId != 0)
+                continue;
+
+            bool inside = hostile.AggroType switch
+            {
+                AggroType.Sound => Dist2D(currentPos, hostile.Position) <= hostileDetectionConfig.SoundAggroRangeYalms,
+                AggroType.Sight => IsInsideFacingCone(currentPos, hostile.Position, hostile.Facing,
+                    HostileDetectionService.FacingConeHalfAngleRadians, HostileDetectionService.FacingConeRangeYalms),
+                _ => false,
+            };
+
+            if (!inside)
+                continue;
+
+            stillInside.Add(hostile.ObjectId);
+            if (!hostilesInsideZone.Contains(hostile.ObjectId))
+            {
+                log.Warning("[FateNav] Entered {AggroType} aggro zone of {Name} (id {DataId}) at {Distance:F1}y — avoidance may have failed",
+                    hostile.AggroType, hostile.Name, hostile.DataId, Dist2D(currentPos, hostile.Position));
+            }
+        }
+
+        hostilesInsideZone = stillInside;
+    }
+
+    private static bool IsInsideFacingCone(Vector3 point, Vector3 apex, float facing, float halfAngle, float range)
+    {
+        float dx = point.X - apex.X;
+        float dz = point.Z - apex.Z;
+        float dist = MathF.Sqrt(dx * dx + dz * dz);
+        if (dist > range)
+            return false;
+        if (dist <= 0.01f)
+            return true; // standing on top of the mob's own position is unsafe from every direction
+
+        float toX = dx / dist, toZ = dz / dist;
+        float forwardX = MathF.Sin(facing), forwardZ = MathF.Cos(facing);
+        float cosAngle = forwardX * toX + forwardZ * toZ;
+        return cosAngle >= MathF.Cos(halfAngle);
     }
 
     // A stale/bad stored coordinate (e.g. a shard's Y off by 100+ yalms) makes vnav hard-fail the
     // whole pathfind ("failed to find polygon on a mesh") instead of just walking somewhere close —
-    // snap to the nearest real mesh point first. FindPointOnFloor keeps X/Z fixed and only corrects
-    // the vertical position via a floor raycast — FindPointOnMesh (nearest-point-on-mesh-surface)
-    // was tried first but can also drift X/Z sideways to the nearest polygon edge, which visibly
-    // shifted the shard/overlay circle left-right even though only Y was ever wrong here. Both IPCs
-    // already return the original point unchanged if nothing is found nearby, so this is safe even
-    // when the point genuinely is fine.
-    private Vector3 SnapToMesh(Vector3 destination)
+    // snap to the nearest real mesh point first. FindPointOnFloor is USUALLY just a floor raycast
+    // that keeps X/Z fixed and only corrects Y — but confirmed via a real repro log, with a wide
+    // enough halfExtentXZ it can also return a polygon whose X/Z is relocated far sideways from the
+    // query (see MaxMeshSnapDriftYalms below, which guards against trusting that blindly).
+    private Vector3 SnapToMesh(Vector3 destination) =>
+        TrySnapToMesh(destination, MeshSnapHalfExtentXZ, 0f, out Vector3 snapped) ? snapped : destination;
+
+    // Uses the Try* form (vnav does report this — its return value is just false/no-op-ish rather
+    // than a thrown error) so a genuinely unreachable point gets logged/detected instead of silently
+    // pathfinding to a spot vnav already told us has no nearby polygon. Confirmed via a real repro
+    // log: an avoidance waypoint (a COMPUTED point, not curated data — the obstacle planner has zero
+    // navmesh/terrain awareness) landed somewhere with no nearby polygon at all, and the old
+    // always-fall-back-to-the-raw-point behavior retried that exact same dead point every ~3s
+    // indefinitely ("failed to find polygon on a mesh", identical coordinates, repeated in the log).
+    private bool TrySnapToMesh(Vector3 destination, float halfExtentXZ, float halfExtentY, out Vector3 snapped)
     {
         try
         {
-            return vnav.FindPointOnFloor(destination, MeshSnapHalfExtentXZ);
+            // halfExtentY > 0 means the caller's own Y guess is unreliable (avoidance waypoints) —
+            // search a generous vertical range around it instead of vnav's narrow implicit floor-query
+            // range, so a badly-guessed height doesn't hide real, nearby ground.
+            bool found = halfExtentY > 0f
+                ? vnav.TryFindPointOnMesh(destination, halfExtentXZ, halfExtentY, out snapped)
+                : vnav.TryFindPointOnFloor(destination, halfExtentXZ, out snapped);
+
+            if (found)
+            {
+                float drift = Dist2D(destination, snapped);
+                if (drift > MaxMeshSnapDriftYalms)
+                {
+                    log.Warning("[FateNav] SnapToMesh: vnav relocated {Destination} to {Snapped} ({Drift:F1}y away, over the {Max}y cap) — rejecting, treating as unfound",
+                        destination, snapped, drift, MaxMeshSnapDriftYalms);
+                    snapped = destination;
+                    return false;
+                }
+
+                return true;
+            }
+
+            log.Debug("[FateNav] SnapToMesh: vnav found no mesh polygon within {HalfExtent}y of {Destination}", halfExtentXZ, destination);
+            snapped = destination;
+            return false;
         }
         catch (Exception ex)
         {
-            log.Warning(ex, "[FateNav] vnav.FindPointOnMesh failed for {Destination}", destination);
-            return destination;
+            log.Warning(ex, "[FateNav] vnav.FindPointOnFloor failed for {Destination}", destination);
+            snapped = destination;
+            return false;
         }
     }
 
     // True once vnav has had a fair chance to pick up the last move request but still reports idle —
     // the tell-tale sign of a silently-dropped PathfindAndMoveCloseTo call (see MovementStallRetryMs).
+    // Suppressed while under attack — combat interrupting movement (facing lock, hitstop, etc.) looks
+    // identical to a genuinely dropped vnav request, but shouldn't burn through the stall-retry budget
+    // and cancel the ENTIRE navigation session just because one hostile is currently hitting us.
     private bool IsMovementStalled() =>
-        NowMs() - lastMoveIssuedMs > MovementStallRetryMs && !SafeIsPathfinding() && !SafeIsRunning();
+        !hostileDetection.IsPlayerUnderAttack()
+        && NowMs() - lastMoveIssuedMs > MovementStallRetryMs && !SafeIsPathfinding() && !SafeIsRunning();
 
     public void Stop()
     {
@@ -538,6 +940,8 @@ public class FateNavigationService(
 
         if (phase == TeleportPhase.WalkingToSourceShard)
         {
+            TryMount(pendingSourceShardPos);
+
             if (UpdateHostileAvoidance(pendingSourceShardPos, ShardInteractRadius))
                 return;
 
@@ -547,11 +951,11 @@ public class FateNavigationService(
                 log.Debug("[FateNav] Update: WalkingToSourceShard done after {Ticks} ticks, continuing via aethernet", phaseTicks);
                 PathViaAethernet(pendingDestination);
             }
-            else if (PhaseElapsedMs > WalkToShardTimeoutMs)
+            else if (PhaseElapsedMs > shardWalkTimeoutMs)
             {
                 // Never reached the shard — proceeding to PathViaAethernet would fire the hop from
                 // wherever we stalled, not from the shard. Abort to a direct walk instead.
-                log.Debug("[FateNav] Update: WalkingToSourceShard timed out after {Ticks} ticks ({ElapsedMs}ms) without reaching shard, aborting to direct walk", phaseTicks, PhaseElapsedMs);
+                log.Debug("[FateNav] Update: WalkingToSourceShard timed out after {Ticks} ticks ({ElapsedMs}ms, timeout {Timeout}ms) without reaching shard, aborting to direct walk", phaseTicks, PhaseElapsedMs, shardWalkTimeoutMs);
                 PathTo(pendingDestination);
             }
             else if (IsMovementStalled())
@@ -643,7 +1047,9 @@ public class FateNavigationService(
             {
                 log.Debug("[FateNav] Update: Settling done after {Ticks} ticks (navmesh ready={Ready}, slot free={SlotFree}), walking to {Destination}", phaseTicks, navReady, slotFree, pendingDestination);
                 TryMount(pendingDestination);
-                StartMove(pendingDestination, EventArrivalRadius);
+                // Goes through avoidance first, same reasoning as PathTo/WalkToShardThenAethernet.
+                if (!UpdateHostileAvoidance(pendingDestination, EventArrivalRadius))
+                    StartMove(pendingDestination, EventArrivalRadius);
                 phase = TeleportPhase.WalkingToDestination;
                 phaseTicks = 0;
                 phaseStartMs = NowMs();
@@ -652,6 +1058,8 @@ public class FateNavigationService(
         }
         else if (phase == TeleportPhase.WalkingToDestination)
         {
+            TryMount(pendingDestination);
+
             if (UpdateHostileAvoidance(pendingDestination, EventArrivalRadius))
                 return;
 
@@ -659,7 +1067,7 @@ public class FateNavigationService(
             if (arrived || PhaseElapsedMs > WalkToDestinationTimeoutMs)
             {
                 log.Debug("[FateNav] Update: WalkingToDestination done after {Ticks} ticks (Arrived={Arrived})", phaseTicks, arrived);
-                if (arrived)
+                if (arrived && PhaseElapsedMs > ArrivalDismountMinPhaseElapsedMs)
                 {
                     Actions.Unmount.Cast();
                 }
@@ -723,8 +1131,8 @@ public class FateNavigationService(
         phase = TeleportPhase.None;
         phaseTicks = 0;
         phaseStartMs = NowMs();
-        avoidingHostile = false;
-        avoidanceAttempts = 0;
+        nextMountAttemptMs = 0;
+        ClearAvoidancePlan();
     }
 
     // Shared decision point for a failed/rejected aethernet hop — retries a bounded number of times
@@ -840,11 +1248,25 @@ public class FateNavigationService(
         catch (Exception ex) { log.Warning(ex, "[FateNav] vnav.Stop() failed"); }
     }
 
+    // Throttled rather than one-shot — a skipped attempt (still casting, mid-combat, CanCast false
+    // for a transient reason) would otherwise never be retried for the rest of the journey, leaving
+    // the player walking the whole way. Called every tick while actively traveling; the throttle
+    // keeps that cheap instead of hammering CanCast()/Cast() at the project's ~170Hz tick rate.
+    // Combat is an exception to the throttle: the moment InCombat clears, retry immediately instead
+    // of potentially waiting out the rest of the interval before mounting back up.
     private void TryMount(Vector3 destination)
     {
+        bool inCombat = player.Conditions[ConditionFlag.InCombat];
+        if (wasInCombat && !inCombat)
+            nextMountAttemptMs = 0;
+        wasInCombat = inCombat;
+
+        if (NowMs() < nextMountAttemptMs) return;
+        nextMountAttemptMs = NowMs() + MountRetryIntervalMs;
+
         if (player.IsMounted() || player.IsMounting()) return;
         if (Dist2D(player.Position, destination) < navigationConfig.MountRange) return;
-        if (player.Conditions[ConditionFlag.InCombat] || player.IsCasting() || player.IsBetweenAreas() || player.IsInteracting()) return;
+        if (inCombat || player.IsCasting() || player.IsBetweenAreas() || player.IsInteracting()) return;
         if (!Actions.MountRoulette.CanCast()) return;
 
         log.Debug("[FateNav] TryMount: casting MountRoulette");
@@ -876,6 +1298,19 @@ public class FateNavigationService(
                 overlay.StrokeLine(from, pendingDestination, FinalPathColor);
                 overlay.StrokeCircle(pendingDestination, EventArrivalRadius, FinalPathColor);
                 break;
+        }
+
+        // Shows the current avoidance detour route, separate from the underlying phase's own
+        // destination line, so the two are never visually confused.
+        if (plannedAvoidancePath is { Count: > 0 } avoidancePlan)
+        {
+            Vector3 prev = from;
+            foreach (var point in avoidancePlan)
+            {
+                overlay.StrokeLine(prev, point, AvoidanceSteerColor);
+                overlay.StrokeCircle(point, 1.5f, AvoidanceSteerColor);
+                prev = point;
+            }
         }
     }
 

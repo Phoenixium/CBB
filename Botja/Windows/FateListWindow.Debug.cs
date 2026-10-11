@@ -26,6 +26,16 @@ public partial class FateListWindow
         if (!ImGui.CollapsingHeader("Debug info"))
             return;
 
+        if (targets.Target is { } distanceTarget && objects.LocalPlayer is { } localPlayer)
+        {
+            float distance = System.Numerics.Vector3.Distance(localPlayer.Position, distanceTarget.Position);
+            ImGui.TextUnformatted($"Distance to target: {distance:F1}y");
+        }
+        else
+        {
+            ImGui.TextUnformatted("Distance to target: no target");
+        }
+
         if (targets.Target is { } target)
         {
             ImGui.TextUnformatted($"Target: {target.Name} — BaseId: {target.BaseId}  Pos: {target.Position:f1}");
@@ -58,6 +68,12 @@ public partial class FateListWindow
         ImGui.TextUnformatted($"pendingDestination: {nav.DebugPendingDestination:F1}");
         ImGui.TextUnformatted($"pendingSourceShardPos: {nav.DebugPendingSourceShardPos:F1}");
         ImGui.TextUnformatted($"pendingDestShardPos: {nav.DebugPendingDestShardPos:F1}");
+
+        ImGui.Separator();
+
+        ImGui.TextUnformatted("Hostile detection debug:");
+        ImGui.TextUnformatted($"Detection radius: {hostileDetection.DetectionRadiusYalms:F1}y");
+        ImGui.TextUnformatted($"Objects scanned: {hostileDetection.DebugTotalObjectCount}  BattleNpc: {hostileDetection.DebugBattleNpcCount}  Hostile-flagged: {hostileDetection.DebugHostileFlaggedCount}  Within radius: {hostileDetection.DebugWithinRadiusCount}");
 
         ImGui.Separator();
 
