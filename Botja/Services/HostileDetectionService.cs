@@ -2,6 +2,7 @@ using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game.Character;
+using FFXIVClientStructs.FFXIV.Client.UI;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -12,9 +13,10 @@ namespace Botja.Services;
 /// <summary>
 /// Detects and tracks nearby hostile NPCs, their positions, and aggro status.
 /// </summary>
-public sealed unsafe class HostileDetectionService(
+public sealed unsafe partial class HostileDetectionService(
     IObjectTable objects,
-    HostileDetectionConfig config
+    HostileDetectionConfig config,
+    IGameGui gameGui
 )
 {
     // GetNearbyHostiles can be called several times per Update() tick (avoidance + UI) at this
@@ -38,32 +40,6 @@ public sealed unsafe class HostileDetectionService(
     private long lastScanMs = -HostileScanIntervalMs; // never-scanned sentinel that can't overflow the subtraction below
     private List<HostileNpc> cachedHostiles = [];
 
-    // Snapshot of the last REAL scan (not a cache hit) — lets the debug UI show exactly which
-    // filtering stage a hostile drops out at, without needing a log file.
-    public int DebugTotalObjectCount { get; private set; }
-    public int DebugBattleNpcCount { get; private set; }
-    public int DebugHostileFlaggedCount { get; private set; }
-    public int DebugWithinRadiusCount { get; private set; }
-
-    /// <summary>
-    /// Information about a detected hostile NPC.
-    /// </summary>
-    public record struct HostileNpc(
-        ulong ObjectId,
-        uint DataId,
-        string Name,
-        Vector3 Position,
-        float DistanceYalms,
-        bool IsTargetingPlayer,
-        bool IsEngagedElsewhere,
-        float Facing,
-        uint CurrentHp,
-        uint MaxHp,
-        byte Rank,
-        AggroType AggroType,
-        uint FateId
-    );
-
     /// <summary>
     /// Gets all hostile NPCs currently detected within DetectionRadiusYalms.
     /// Returns empty list if no player or no enemies found.
@@ -78,10 +54,7 @@ public sealed unsafe class HostileDetectionService(
         var player = objects.LocalPlayer;
         if (player == null)
         {
-            DebugTotalObjectCount = 0;
-            DebugBattleNpcCount = 0;
-            DebugHostileFlaggedCount = 0;
-            DebugWithinRadiusCount = 0;
+            ResetDebugScanCounters();
             cachedHostiles = [];
             return cachedHostiles;
         }
@@ -94,6 +67,7 @@ public sealed unsafe class HostileDetectionService(
         int totalObjectCount = 0;
         int battleNpcCount = 0;
         int hostileFlaggedCount = 0;
+        var friendlyNameplateAddresses = GetFriendlyNameplateAddresses();
 
         foreach (var obj in objects)
         {
@@ -106,6 +80,9 @@ public sealed unsafe class HostileDetectionService(
 
             // Only include NPCs whose object status flags explicitly mark them hostile.
             if (!battleNpc.StatusFlags.HasFlag(StatusFlags.Hostile))
+                continue;
+
+            if (friendlyNameplateAddresses.Contains(battleNpc.Address))
                 continue;
 
             // Allied/friendly battle NPCs (e.g. Bozja Resistance troops that join your party for a
@@ -158,14 +135,31 @@ public sealed unsafe class HostileDetectionService(
             ));
         }
 
-        DebugTotalObjectCount = totalObjectCount;
-        DebugBattleNpcCount = battleNpcCount;
-        DebugHostileFlaggedCount = hostileFlaggedCount;
-        DebugWithinRadiusCount = hostiles.Count;
+        UpdateDebugScanCounters(totalObjectCount, battleNpcCount, hostileFlaggedCount, hostiles.Count);
 
         // Sort by distance (closest first).
         cachedHostiles = [.. hostiles.OrderBy(h => h.DistanceYalms)];
         return cachedHostiles;
+    }
+
+    private static HashSet<nint> GetFriendlyNameplateAddresses()
+    {
+        var addresses = new HashSet<nint>();
+        var uiModule = UIModule.Instance();
+        var ui3d = uiModule == null ? null : uiModule->GetUI3DModule();
+        if (ui3d == null)
+            return addresses;
+
+        for (int index = 0; index < ui3d->ObjectInfos.Length; index++)
+        {
+            ref var info = ref ui3d->ObjectInfos[index];
+            if (info.GameObject != null
+                && (info.NamePlateObjectKind == UIObjectKind.BattleNpcFriendly
+                    || info.NamePlateObjectKindAdjusted == UIObjectKind.BattleNpcFriendly))
+                addresses.Add((nint)info.GameObject);
+        }
+
+        return addresses;
     }
 
     private static byte GetForayRank(IBattleNpc battleNpc)
@@ -205,13 +199,20 @@ public sealed unsafe class HostileDetectionService(
     /// sight/sound range, so a sound-type hostile's much larger radius is still considered from
     /// further off to the side than a sight-type one's narrower cone).
     /// </summary>
-    public IReadOnlyList<HostileNpc> GetRouteRelevantHostiles(Vector3 from, Vector3 to, float soundRangeYalms, float safetyMarginYalms)
+    public IReadOnlyList<HostileNpc> GetRouteRelevantHostiles(Vector3 from, Vector3 to, float soundRangeYalms, float safetyMarginYalms) =>
+        GetHostilesNearPath([from, to], soundRangeYalms, safetyMarginYalms);
+
+    /// <summary>
+    /// Same relevance test as <see cref="GetRouteRelevantHostiles"/>, generalized to every segment of
+    /// an arbitrary polyline instead of just the straight start-to-destination line — lets a caller
+    /// check hostiles against vnav's own REAL (terrain-following) route, which can curve away from
+    /// the idealized straight line and pass closer to a hostile than the straight-line check alone
+    /// would ever catch.
+    /// </summary>
+    public IReadOnlyList<HostileNpc> GetHostilesNearPath(IReadOnlyList<Vector3> path, float soundRangeYalms, float safetyMarginYalms)
     {
         var result = new List<HostileNpc>();
-        float routeX = to.X - from.X;
-        float routeZ = to.Z - from.Z;
-        float routeLengthSquared = routeX * routeX + routeZ * routeZ;
-        if (routeLengthSquared <= 0.01f)
+        if (path.Count < 2)
             return result;
 
         foreach (var hostile in GetNearbyHostiles())
@@ -242,22 +243,43 @@ public sealed unsafe class HostileDetectionService(
             if (hostile.DistanceYalms * hostile.DistanceYalms > nearTermRangeSquared)
                 continue;
 
-            float hostileX = hostile.Position.X - from.X;
-            float hostileZ = hostile.Position.Z - from.Z;
-            float alongRoute = Math.Clamp((hostileX * routeX + hostileZ * routeZ) / routeLengthSquared, 0f, 1f);
-            float nearestX = from.X + routeX * alongRoute;
-            float nearestZ = from.Z + routeZ * alongRoute;
-            float dx = hostile.Position.X - nearestX;
-            float dz = hostile.Position.Z - nearestZ;
-            float perpDistSquared = dx * dx + dz * dz;
-            float threatRadius = extent * ThreatFalloffMultiplier;
-            if (perpDistSquared > threatRadius * threatRadius)
-                continue;
+            float threatRadiusSquared = MathF.Pow(extent * ThreatFalloffMultiplier, 2f);
+            bool nearAnySegment = false;
+            for (int i = 0; i < path.Count - 1; i++)
+            {
+                if (PerpDistSquaredToSegment(hostile.Position, path[i], path[i + 1]) <= threatRadiusSquared)
+                {
+                    nearAnySegment = true;
+                    break;
+                }
+            }
 
-            result.Add(hostile);
+            if (nearAnySegment)
+                result.Add(hostile);
         }
 
         return result;
+    }
+
+    // Squared perpendicular distance from a point to the closest spot on a single segment (clamped to
+    // the segment's own endpoints) — XZ only, matching every other route-proximity check here.
+    private static float PerpDistSquaredToSegment(Vector3 point, Vector3 a, Vector3 b)
+    {
+        float routeX = b.X - a.X;
+        float routeZ = b.Z - a.Z;
+        float lengthSquared = routeX * routeX + routeZ * routeZ;
+        if (lengthSquared <= 0.01f)
+        {
+            float dx0 = point.X - a.X, dz0 = point.Z - a.Z;
+            return dx0 * dx0 + dz0 * dz0;
+        }
+
+        float t = Math.Clamp(((point.X - a.X) * routeX + (point.Z - a.Z) * routeZ) / lengthSquared, 0f, 1f);
+        float nearestX = a.X + routeX * t;
+        float nearestZ = a.Z + routeZ * t;
+        float dx = point.X - nearestX;
+        float dz = point.Z - nearestZ;
+        return dx * dx + dz * dz;
     }
 
     /// <summary>

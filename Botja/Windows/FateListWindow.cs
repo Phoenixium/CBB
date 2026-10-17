@@ -122,7 +122,8 @@ public partial class FateListWindow(
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Continuously travel to and fight the next FATE, joining recruiting CEs first");
-        ImGui.TextUnformatted(autoMode.Status);
+        if (!string.IsNullOrEmpty(autoMode.Status))
+            ImGui.TextUnformatted(autoMode.Status);
 
         if (nav.DebugPhase != "None" && !string.IsNullOrEmpty(nav.DebugPendingDestinationName))
             ImGui.TextUnformatted($"Going to fate: {nav.DebugPendingDestinationName}");

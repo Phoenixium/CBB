@@ -25,6 +25,7 @@ public sealed class AutoModeService(
     CombatControlService combatControl,
     AutoModeState autoModeState,
     FollowConfig follow,
+    AutoModeConfig autoModeConfig,
     IPluginLog log
 ) : IOnUpdate
 {
@@ -51,6 +52,7 @@ public sealed class AutoModeService(
     {
         IsRunning = true;
         autoModeState.IsRunning = true;
+        autoModeState.IsEngagedInFate = false;
         pendingIsFollowFate = false;
         waitingForFollowUp = false;
         Status = "Looking for the next FATE or CE.";
@@ -60,6 +62,7 @@ public sealed class AutoModeService(
     {
         IsRunning = false;
         autoModeState.IsRunning = false;
+        autoModeState.IsEngagedInFate = false;
         pendingIsFollowFate = false;
         waitingForFollowUp = false;
         nav.Stop();
@@ -72,6 +75,10 @@ public sealed class AutoModeService(
     {
         if (!IsRunning)
             return;
+
+        autoModeState.IsEngagedInFate = objects.LocalPlayer?.IsDead != true &&
+            combatControl.ActiveCeEventId == 0 && !nav.IsNavigating &&
+            combatControl.ActiveFateId != 0 && IsNearActiveFate();
 
         if (objects.LocalPlayer?.IsDead == true)
         {
@@ -105,10 +112,27 @@ public sealed class AutoModeService(
         // Queue/sign up for a recruiting CE in the background (CeSignupService runs its own Update
         // independently) — never stops current FATE travel/combat, only actually switching over once
         // the CE commences (handled above). ceSignup.Status is surfaced separately in the UI.
-        if (!ceSignup.IsRunning && (ceSignup.TryFindRecruitingEvent(out _) || ceSignup.HasRecentCeAnnouncement))
+        if (!autoModeConfig.DoCriticalEngagements && ceSignup.IsRunning)
+            ceSignup.Stop();
+
+        if (autoModeConfig.DoCriticalEngagements && !ceSignup.IsRunning && (ceSignup.TryFindRecruitingEvent(out _, includeWarmup: true) || ceSignup.HasRecentCeAnnouncement))
         {
             log.Debug("[AutoMode] Recruiting CE found, queueing signup in the background");
             ceSignup.Start();
+        }
+
+        if (!autoModeConfig.DoFates)
+        {
+            if (nav.IsNavigating)
+                nav.Stop();
+            if (combatControl.ActiveFateId != 0)
+                combatControl.SetActiveFate(0);
+            pendingIsFollowFate = false;
+            waitingForFollowUp = false;
+            Status = autoModeConfig.DoCriticalEngagements
+                ? "FATE automation is disabled; waiting for a critical engagement."
+                : "FATE and critical engagement automation are disabled.";
+            return;
         }
 
         // Handled here, before the generic nav.IsNavigating block below, since that block would
@@ -139,17 +163,7 @@ public sealed class AutoModeService(
         {
             if (combatControl.ActiveFateId != 0)
             {
-                Status = nav.IsResolvingCombat
-                    ? "Teleport blocked by combat; fighting/fleeing before retrying."
-                    : $"Travelling to {nav.DebugPendingDestinationName}.";
-                return;
-            }
-
-            if (nav.IsResolvingCombat)
-            {
-                // No FATE armed (e.g. a manual walk) but still let FateNavigationService finish
-                // fighting/fleeing off combat on its own — don't yank the nav out from under it.
-                Status = "Teleport blocked by combat; fighting/fleeing before retrying.";
+                Status = string.Empty;
                 return;
             }
 

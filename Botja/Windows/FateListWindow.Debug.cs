@@ -64,6 +64,7 @@ public partial class FateListWindow
         ImGui.TextUnformatted("Navigation debug:");
         ImGui.TextUnformatted($"Phase: {nav.DebugPhase}  (ticks: {nav.DebugPhaseTicks})");
         ImGui.TextUnformatted($"vnav: Pathfinding={nav.DebugVnavIsPathfinding}  Running={nav.DebugVnavIsRunning}  NavmeshReady={nav.DebugVnavIsNavmeshReady}");
+        ImGui.TextUnformatted($"vnav real path waypoints: {nav.DebugVnavPathWaypointCount}");
         ImGui.TextUnformatted($"lifestream busy: {nav.DebugLifestreamBusy}");
         ImGui.TextUnformatted($"pendingDestination: {nav.DebugPendingDestination:F1}");
         ImGui.TextUnformatted($"pendingSourceShardPos: {nav.DebugPendingSourceShardPos:F1}");
@@ -74,6 +75,10 @@ public partial class FateListWindow
         ImGui.TextUnformatted("Hostile detection debug:");
         ImGui.TextUnformatted($"Detection radius: {hostileDetection.DetectionRadiusYalms:F1}y");
         ImGui.TextUnformatted($"Objects scanned: {hostileDetection.DebugTotalObjectCount}  BattleNpc: {hostileDetection.DebugBattleNpcCount}  Hostile-flagged: {hostileDetection.DebugHostileFlaggedCount}  Within radius: {hostileDetection.DebugWithinRadiusCount}");
+        if (ImGui.Button("Copy verbose NPC data"))
+            ImGui.SetClipboardText(hostileDetection.DumpNpcDebugData(targets.Target, clientState.TerritoryType));
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Copies all loaded battle NPCs, the selected target, raw flags, native fields, and hostile-filter decisions as text.");
 
         ImGui.Separator();
 

@@ -9,7 +9,7 @@ using System.Linq;
 
 namespace Botja.Services;
 
-public sealed unsafe class CeSignupService(GuiInteractionService guiInteract, IDataManager data, IChatGui chatGui, IObjectTable objects, IPluginConfig pluginConfig, IConfigSaver configSaver, IPluginLog log) : IOnUpdate, IOnLoad, IOnStop
+public sealed unsafe class CeSignupService(GuiInteractionService guiInteract, IDataManager data, IChatGui chatGui, IObjectTable objects, IPluginConfig pluginConfig, IConfigSaver configSaver, IPluginLog log, AutoModeState autoModeState, IPartyList party) : IOnUpdate, IOnLoad, IOnStop
 {
     private static readonly TimeSpan ActionDelay = TimeSpan.FromMilliseconds(500);
     private static readonly TimeSpan AttemptTimeout = TimeSpan.FromMinutes(5);
@@ -27,8 +27,6 @@ public sealed unsafe class CeSignupService(GuiInteractionService guiInteract, ID
         Idle,
         Opening,
         ConfirmingRegistration,
-        CheckingImmediateCommence,
-        WaitingForSelection,
         WaitingForCommence,
         ConfirmingCommence,
     }
@@ -97,14 +95,44 @@ public sealed unsafe class CeSignupService(GuiInteractionService guiInteract, ID
         switch (phase)
         {
             case Phase.Opening:
-                RequestRecruitmentWindow();
-                if (!TryFindRecruitingEvent(out targetEventId))
+                if (targetEventId == 0 && !TryFindRecruitingEvent(out targetEventId, includeWarmup: true))
                 {
-                    Status = "Waiting for a non-solo, non-large-scale recruiting CE.";
+                    Status = "Waiting for a non-solo, non-large-scale joinable CE.";
+                    break;
                 }
-                else if (ClickButton("Register", "Request Deployment", "Deploy"))
+
+                var pendingEvent = GetRegistrationState();
+                if (pendingEvent == null)
+                {
+                    Status = "Waiting for CE assignment.";
+                    break;
+                }
+
+                if (pendingEvent.Value.State != DynamicEventState.Register && pendingEvent.Value.State != DynamicEventState.Warmup)
+                {
+                    StopWithStatus("Stopped: CE registration is no longer available.");
+                    break;
+                }
+
+                if (pendingEvent.Value.State == DynamicEventState.Register && IsWaitingForPartyLeader())
+                {
+                    Status = $"Waiting for the party leader to register or CE warmup ({pendingEvent.Value.SecondsLeft}s left).";
+                    break;
+                }
+
+                if (!EnsureRecruitmentWindowOpen())
+                {
+                    Status = "Waiting for the recruitment window.";
+                    break;
+                }
+
+                if (ClickButton("Register", "Request Deployment", "Deploy"))
                 {
                     Advance(Phase.ConfirmingRegistration, "Registration requested; waiting for confirmation.");
+                }
+                else if (pendingEvent.Value.State == DynamicEventState.Warmup)
+                {
+                    Advance(Phase.WaitingForCommence, "CE warmup started; waiting for the deployment timer.");
                 }
                 else
                 {
@@ -114,24 +142,10 @@ public sealed unsafe class CeSignupService(GuiInteractionService guiInteract, ID
 
             case Phase.ConfirmingRegistration:
                 if (guiInteract.ClickSelectYesnoYes())
-                    Advance(Phase.CheckingImmediateCommence, "Registration confirmed; reopening recruitment to check deployment.");
+                    Advance(Phase.WaitingForCommence, "Registered; waiting for the CE timer.");
                 break;
 
-            case Phase.CheckingImmediateCommence:
-                RequestRecruitmentWindow();
-                if (!guiInteract.IsCeRecruitmentWindowOpen())
-                {
-                    Status = "Registration confirmed; opening recruitment to check deployment.";
-                    break;
-                }
-
-                if (ClickButton("Commence", "Enter", "Join", "Deploy Now", "Proceed", "Begin", "Start"))
-                    Advance(Phase.ConfirmingCommence, "Commence requested; waiting for confirmation.");
-                else
-                    Advance(Phase.WaitingForSelection, "Registered; waiting for the recruitment timer.");
-                break;
-
-            case Phase.WaitingForSelection:
+            case Phase.WaitingForCommence:
                 var registration = GetRegistrationState();
                 if (registration == null)
                 {
@@ -140,20 +154,40 @@ public sealed unsafe class CeSignupService(GuiInteractionService guiInteract, ID
                 }
 
                 targetEventId = registration.Value.EventId;
-                if (registration.Value.State == DynamicEventState.Register && registration.Value.SecondsLeft > 0)
+                if (registration.Value.State == DynamicEventState.Register)
                 {
                     Status = $"Registered; waiting for selection ({registration.Value.SecondsLeft}s).";
                     break;
                 }
 
-                Advance(Phase.WaitingForCommence, "Recruitment ended; opening the deployment window.");
-                break;
+                if (registration.Value.State != DynamicEventState.Warmup)
+                {
+                    StopWithStatus("Stopped: CE deployment is no longer available.");
+                    break;
+                }
 
-            case Phase.WaitingForCommence:
-                RequestRecruitmentWindow();
+                if (autoModeState.IsRunning && !ShouldCommence(registration.Value.SecondsLeft,
+                    registration.Value.WarmupSeconds, autoModeState.IsEngagedInFate))
+                {
+                    Status = autoModeState.IsEngagedInFate
+                        ? $"Registered; continuing FATE until 15s remain ({registration.Value.SecondsLeft}s left)."
+                        : $"Registered; waiting for 20s of CE warmup to elapse ({registration.Value.SecondsLeft}s left).";
+                    break;
+                }
+
+                if (!EnsureRecruitmentWindowOpen())
+                {
+                    Status = "Waiting for the recruitment window.";
+                    break;
+                }
+
                 if (ClickButton("Commence", "Enter", "Join", "Deploy Now", "Proceed", "Begin", "Start"))
                 {
                     Advance(Phase.ConfirmingCommence, "Commence requested; waiting for confirmation.");
+                }
+                else if (ClickButton("Register", "Request Deployment", "Deploy"))
+                {
+                    Advance(Phase.ConfirmingRegistration, "Registration requested; waiting for confirmation.");
                 }
                 else
                 {
@@ -173,8 +207,21 @@ public sealed unsafe class CeSignupService(GuiInteractionService guiInteract, ID
         nextActionAt = DateTime.UtcNow + ActionDelay;
     }
 
+    private bool IsWaitingForPartyLeader()
+    {
+        if (party.Length <= 1)
+            return false;
+
+        var leaderIndex = (int)party.PartyLeaderIndex;
+        return leaderIndex < 0 || leaderIndex >= party.Length || objects.LocalPlayer is not { } localPlayer ||
+            party[leaderIndex]?.EntityId != localPlayer.EntityId;
+    }
+
     private bool ClickButton(params string[] labels)
     {
+        if (!guiInteract.IsCeRecruitmentWindowOpen())
+            return false;
+
         var eventName = GetEventName(targetEventId);
         if (string.IsNullOrWhiteSpace(eventName))
             return false;
@@ -184,12 +231,18 @@ public sealed unsafe class CeSignupService(GuiInteractionService guiInteract, ID
         return button != null && guiInteract.ClickCeRecruitmentButton(button, eventName);
     }
 
-    private void RequestRecruitmentWindow()
+    private bool EnsureRecruitmentWindowOpen()
     {
-        if (openRequested)
-            return;
+        if (guiInteract.IsCeRecruitmentWindowOpen())
+        {
+            openRequested = false;
+            return true;
+        }
 
-        openRequested = guiInteract.OpenCeRecruitmentWindow();
+        if (!openRequested)
+            openRequested = guiInteract.OpenCeRecruitmentWindow();
+
+        return false;
     }
 
     private void Advance(Phase nextPhase, string status)
@@ -207,7 +260,7 @@ public sealed unsafe class CeSignupService(GuiInteractionService guiInteract, ID
 
     // Scans for any CE currently open for registration, regardless of our own signup state —
     // used by AutoModeService to decide whether a CE should take priority over the next FATE.
-    public bool TryFindRecruitingEvent(out ushort eventId)
+    public bool TryFindRecruitingEvent(out ushort eventId, bool includeWarmup = false)
     {
         eventId = 0;
 
@@ -227,7 +280,7 @@ public sealed unsafe class CeSignupService(GuiInteractionService guiInteract, ID
         foreach (ref var dynamicEvent in container->Events)
         {
             if (dynamicEvent.DynamicEventId != 0 &&
-                dynamicEvent.State == DynamicEventState.Register &&
+                (dynamicEvent.State == DynamicEventState.Register || (includeWarmup && dynamicEvent.State == DynamicEventState.Warmup)) &&
                 !IsExcludedEvent(dynamicEvent.DynamicEventId))
             {
                 eventId = dynamicEvent.DynamicEventId;
@@ -271,7 +324,7 @@ public sealed unsafe class CeSignupService(GuiInteractionService guiInteract, ID
         return false;
     }
 
-    private (ushort EventId, DynamicEventState State, uint SecondsLeft)? GetRegistrationState()
+    private (ushort EventId, DynamicEventState State, uint SecondsLeft, uint WarmupSeconds)? GetRegistrationState()
     {
         DynamicEventContainer* container;
         try
@@ -295,10 +348,35 @@ public sealed unsafe class CeSignupService(GuiInteractionService guiInteract, ID
         foreach (ref var dynamicEvent in container->Events)
         {
             if (dynamicEvent.DynamicEventId == targetEventId)
-                return (targetEventId, dynamicEvent.State, dynamicEvent.SecondsLeft);
+            {
+                var eventPointer = (byte*)System.Runtime.CompilerServices.Unsafe.AsPointer(ref dynamicEvent);
+                return (targetEventId, dynamicEvent.State,
+                    GetTimerSeconds(dynamicEvent.State, dynamicEvent.StartTimestamp, dynamicEvent.SecondsLeft,
+                        DateTimeOffset.UtcNow.ToUnixTimeSeconds()),
+                    *(uint*)(eventPointer + 0x70));
+            }
         }
 
         return null;
+    }
+
+    private static bool ShouldCommence(uint secondsLeft, uint warmupSeconds, bool engagedInFate)
+    {
+        if (secondsLeft == 0)
+            return false;
+
+        if (secondsLeft <= 15)
+            return true;
+
+        return !engagedInFate && warmupSeconds >= secondsLeft && warmupSeconds - secondsLeft >= 20;
+    }
+
+    private static uint GetTimerSeconds(DynamicEventState state, int startTimestamp, uint secondsLeft, long nowUnix)
+    {
+        if ((state == DynamicEventState.Register || state == DynamicEventState.Warmup || state == DynamicEventState.Battle) && startTimestamp > 0)
+            return (uint)Math.Clamp((long)startTimestamp - nowUnix, 0L, uint.MaxValue);
+
+        return secondsLeft;
     }
 
     private bool IsLargeScale(ushort eventId)
@@ -356,21 +434,30 @@ public sealed unsafe class CeSignupService(GuiInteractionService guiInteract, ID
         if (container == null)
             return "No registered CE timer";
 
-        ushort eventId = targetEventId;
-        if (eventId == 0 && container->CurrentEventIndex >= 0)
-            eventId = container->CurrentEventId;
-        if (eventId == 0)
-            return "No registered CE timer";
-
+        var selectedTimer = "No active CE timer";
+        var selectedPriority = 0;
         foreach (ref var dynamicEvent in container->Events)
         {
-            if (dynamicEvent.DynamicEventId != eventId)
+            if (dynamicEvent.DynamicEventId == 0 || dynamicEvent.State == DynamicEventState.Inactive)
                 continue;
 
-            return $"CE #{dynamicEvent.DynamicEventId}: {dynamicEvent.SecondsLeft}s ({dynamicEvent.State})";
+            var isCurrentEvent = container->CurrentEventIndex >= 0 && dynamicEvent.DynamicEventId == container->CurrentEventId;
+            if (dynamicEvent.State == DynamicEventState.Battle && !isCurrentEvent)
+                continue;
+
+            var priority = isCurrentEvent
+                ? 3
+                : dynamicEvent.DynamicEventId == targetEventId ? 2 : 1;
+            if (priority <= selectedPriority)
+                continue;
+
+            selectedPriority = priority;
+            var secondsLeft = GetTimerSeconds(dynamicEvent.State, dynamicEvent.StartTimestamp,
+                dynamicEvent.SecondsLeft, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+            selectedTimer = $"CE #{dynamicEvent.DynamicEventId}: {secondsLeft}s ({dynamicEvent.State})";
         }
 
-        return "Registered CE timer unavailable";
+        return selectedTimer;
     }
 
     private string GetEventName(ushort eventId)

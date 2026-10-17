@@ -124,9 +124,9 @@ public sealed unsafe class CombatControlService(
         if (activeCeEventId == 0 && ceSignup.TryGetCurrentEventId(out var currentCeEventId))
             activeCeEventId = currentCeEventId;
 
-        // ResolvingCombat is FateNavigationService actively trying to fight/flee off whatever blocked
-        // a teleport — treat that like "arrived", not "travelling", so the rotation can help clear it.
-        bool traveling = nav.IsNavigating && !nav.IsResolvingCombat;
+        // Travelling (walking/teleporting) still holds off auto-rotation — combat no longer pauses
+        // movement, so there's no separate "fighting off a blocked teleport" state to carve out here.
+        bool traveling = nav.IsNavigating;
         bool fateActive = activeFateId != 0 && IsFateStillActive(activeFateId);
         bool ceActive = activeCeEventId != 0 && IsCeStillActive(activeCeEventId);
 

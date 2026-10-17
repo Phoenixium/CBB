@@ -64,8 +64,12 @@ internal static class ObstaclePathPlanner
     // candidate route is blocked — genuinely boxed in). comfortDistanceYalms is how far beyond
     // an obstacle's own hard radius still counts as "worth avoiding when the extra distance is
     // cheap" — the user-tunable knob for how wide a berth the route prefers to give when it's free
-    // to do so (HostileDetectionConfig.AvoidanceComfortDistanceYalms).
-    public static List<Vector3>? FindPath(Vector3 from, Vector3 to, IReadOnlyList<PathObstacle> obstacles, float comfortDistanceYalms)
+    // to do so (HostileDetectionConfig.AvoidanceComfortDistanceYalms). realPathSpine, if given, is
+    // vnav's own real terrain-following route (the "white line") from roughly here to the
+    // destination — used only to shape the search area around the real route's curvature instead of
+    // the idealized straight line, never as the literal move target (see FateNavigationService for
+    // why steering to a real-path sub-node directly is a confirmed-bad idea).
+    public static List<Vector3>? FindPath(Vector3 from, Vector3 to, IReadOnlyList<PathObstacle> obstacles, float comfortDistanceYalms, IReadOnlyList<Vector3>? realPathSpine = null)
     {
         Vector2 start = new(from.X, from.Z);
         Vector2 goal = new(to.X, to.Z);
@@ -94,7 +98,7 @@ internal static class ObstaclePathPlanner
             escaped = true;
         }
 
-        Grid grid = BuildGrid(planStart, goal, obstacles, comfortDistanceYalms);
+        Grid grid = BuildGrid(planStart, goal, obstacles, comfortDistanceYalms, realPathSpine);
         List<Vector2>? rawPath = AStar(grid, planStart, goal);
         if (rawPath == null)
             return null;
@@ -168,15 +172,35 @@ internal static class ObstaclePathPlanner
         return IsSegmentBlocked(new Vector2(from.X, from.Z), new Vector2(to.X, to.Z), obstacles);
     }
 
-    private static Grid BuildGrid(Vector2 start, Vector2 goal, IReadOnlyList<PathObstacle> obstacles, float comfortDistanceYalms)
+    private static Grid BuildGrid(Vector2 start, Vector2 goal, IReadOnlyList<PathObstacle> obstacles, float comfortDistanceYalms, IReadOnlyList<Vector3>? realPathSpine)
     {
         float maxObstacleExtent = obstacles.Count > 0 ? obstacles.Max(o => o.Radius) : 0f;
         float margin = maxObstacleExtent + comfortDistanceYalms + BoundingBoxMarginYalms;
 
-        float minX = MathF.Min(start.X, goal.X) - margin;
-        float maxX = MathF.Max(start.X, goal.X) + margin;
-        float minY = MathF.Min(start.Y, goal.Y) - margin;
-        float maxY = MathF.Max(start.Y, goal.Y) + margin;
+        // Bounding box covers every spine point (start, goal, and vnav's own real-path nodes if
+        // given), not just the straight start->goal line — a real terrain-following route that bows
+        // out around terrain the straight line never touches still gets proper search coverage, so a
+        // detour can follow that same general shape instead of being squeezed into a narrower box an
+        // idealized straight line would imply.
+        float minX = MathF.Min(start.X, goal.X);
+        float maxX = MathF.Max(start.X, goal.X);
+        float minY = MathF.Min(start.Y, goal.Y);
+        float maxY = MathF.Max(start.Y, goal.Y);
+        if (realPathSpine != null)
+        {
+            foreach (var point in realPathSpine)
+            {
+                minX = MathF.Min(minX, point.X);
+                maxX = MathF.Max(maxX, point.X);
+                minY = MathF.Min(minY, point.Z);
+                maxY = MathF.Max(maxY, point.Z);
+            }
+        }
+
+        minX -= margin;
+        maxX += margin;
+        minY -= margin;
+        maxY += margin;
 
         float cellSize = CellSizeYalms;
         int width = Math.Max(2, (int)MathF.Ceiling((maxX - minX) / cellSize));

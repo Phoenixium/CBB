@@ -23,6 +23,8 @@ public interface IPluginConfig
     HostileDetectionConfig HostileDetection { get; }
 
     FollowConfig Follow { get; }
+
+    AutoModeConfig AutoMode { get; }
 }
 
 public sealed class PluginConfig : IPluginConfig, IPluginConfiguration
@@ -43,6 +45,8 @@ public sealed class PluginConfig : IPluginConfig, IPluginConfiguration
 
     public FollowConfig Follow { get; set; } = new();
 
+    public AutoModeConfig AutoMode { get; set; } = new();
+
     public void HydrateMissingSections()
     {
         Navigation ??= new();
@@ -52,6 +56,7 @@ public sealed class PluginConfig : IPluginConfig, IPluginConfiguration
         Blacklist ??= new();
         HostileDetection ??= new();
         Follow ??= new();
+        AutoMode ??= new();
         ItemInspection.SkipItemIds ??= [];
         Blacklist.FateIds ??= [];
         Blacklist.CeEventIds ??= [];
@@ -145,6 +150,15 @@ public sealed class FollowConfig : IAutoConfig
 
     [FloatRange(5f, 100f)]
     public float RadiusYalms { get; set; } = 30f;
+}
+
+public sealed class AutoModeConfig : IAutoConfig
+{
+    [Checkbox]
+    public bool DoCriticalEngagements { get; set; } = true;
+
+    [Checkbox]
+    public bool DoFates { get; set; } = true;
 }
 
 public sealed class HostileDetectionConfig : IAutoConfig

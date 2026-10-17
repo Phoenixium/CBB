@@ -8,6 +8,15 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using Dalamud.Game.ClientState.Objects.Enums;
+using Dalamud.Game.ClientState.Objects.Types;
+using Dalamud.Plugin.Services;
+using FFXIVClientStructs.FFXIV.Client.Game.Character;
+using FFXIVClientStructs.FFXIV.Client.UI.Arrays;
+using System.Collections;
+using System.Globalization;
+using System.Numerics;
+using System.Reflection;
 
 namespace Botja.Services;
 
@@ -626,4 +635,366 @@ public unsafe partial class GuiInteractionService
         ids.Reverse();
         return string.Join("/", ids.Select(id => id.ToString()));
     }
+}
+
+public sealed unsafe partial class HostileDetectionService
+{
+    // Snapshot of the last REAL scan (not a cache hit) — lets the debug UI show exactly which
+    // filtering stage a hostile drops out at, without needing a log file.
+    public int DebugTotalObjectCount { get; private set; }
+    public int DebugBattleNpcCount { get; private set; }
+    public int DebugHostileFlaggedCount { get; private set; }
+    public int DebugWithinRadiusCount { get; private set; }
+
+    private void ResetDebugScanCounters() => UpdateDebugScanCounters(0, 0, 0, 0);
+
+    private void UpdateDebugScanCounters(int totalObjects, int battleNpcs, int hostileFlagged, int withinRadius)
+    {
+        DebugTotalObjectCount = totalObjects;
+        DebugBattleNpcCount = battleNpcs;
+        DebugHostileFlaggedCount = hostileFlagged;
+        DebugWithinRadiusCount = withinRadius;
+    }
+
+    /// <summary>
+    /// Information about a detected hostile NPC.
+    /// </summary>
+    public record struct HostileNpc(
+        ulong ObjectId,
+        uint DataId,
+        string Name,
+        Vector3 Position,
+        float DistanceYalms,
+        bool IsTargetingPlayer,
+        bool IsEngagedElsewhere,
+        float Facing,
+        uint CurrentHp,
+        uint MaxHp,
+        byte Rank,
+        AggroType AggroType,
+        uint FateId
+    );
+
+    public string DumpNpcDebugData(IGameObject? selectedTarget, uint territoryId)
+    {
+        var report = new StringBuilder();
+        var player = objects.LocalPlayer;
+        var detectedIds = GetNearbyHostiles().Select(hostile => hostile.ObjectId).ToHashSet();
+        var friendlyNameplateAddresses = GetFriendlyNameplateAddresses();
+        float radius = config.DetectionRadiusYalms > 0f ? config.DetectionRadiusYalms : 100f;
+        var npcs = objects.OfType<IBattleNpc>()
+            .OrderByDescending(npc => npc.GameObjectId == selectedTarget?.GameObjectId)
+            .ThenBy(npc => player == null ? 0f : Vector3.DistanceSquared(player.Position, npc.Position))
+            .ToList();
+
+        report.AppendLine("BOTJA NPC DIAGNOSTIC EXPORT");
+        report.AppendLine($"Captured UTC: {DateTime.UtcNow:O}");
+        report.AppendLine($"Territory ID: {territoryId}");
+        report.AppendLine($"Configured radius: {config.DetectionRadiusYalms.ToString(CultureInfo.InvariantCulture)}y; effective radius: {radius.ToString(CultureInfo.InvariantCulture)}y (XZ)");
+        report.AppendLine($"Loaded battle NPCs: {npcs.Count}; cached detected hostiles: {detectedIds.Count}");
+        report.AppendLine($"Scan counters: Objects={DebugTotalObjectCount}; BattleNpc={DebugBattleNpcCount}; HostileFlaggedAfterAllyExclusion={DebugHostileFlaggedCount}; WithinRadius={DebugWithinRadiusCount}");
+        report.AppendLine("Scope: all client-loaded battle NPCs, including friendly, dead, untargetable, and out-of-radius NPCs. Not a full-zone scan.");
+        report.AppendLine("Live filter results below are separate from the detection cache (up to 150ms old).");
+        report.AppendLine("StatusFlags.Hostile is the current filter input, not proof of hostility toward the player.");
+        report.AppendLine("AggroType is a Botja lookup, not a native faction or allegiance field.");
+        report.AppendLine("Nameplate UI kind and color category are independent diagnostic signals; colors can be customized and are not proof of allegiance.");
+        report.AppendLine("Property reads are bounded and report errors individually; pointers are addresses only, not memory dumps.");
+        report.AppendLine();
+        report.AppendLine("LOCAL PLAYER");
+        AppendObjectProperties(report, player);
+        report.AppendLine();
+        report.AppendLine("SELECTED TARGET");
+        AppendObjectProperties(report, selectedTarget);
+        if (selectedTarget != null && selectedTarget is not IBattleNpc)
+            AppendNameplateDebugData(report, selectedTarget);
+
+        foreach (var npc in npcs)
+        {
+            report.AppendLine();
+            report.AppendLine(new string('=', 80));
+            report.AppendLine($"NPC: {npc.Name}; SelectedTarget={npc.GameObjectId == selectedTarget?.GameObjectId}");
+            report.AppendLine($"ObjectId: {npc.GameObjectId} (0x{npc.GameObjectId:X16}); BaseId: {npc.BaseId}; Address: 0x{npc.Address:X}");
+            report.AppendLine($"CachedDetectionIncludesNpc: {detectedIds.Contains(npc.GameObjectId)}");
+            try
+            {
+                var flags = npc.StatusFlags;
+                var target = npc.TargetObject;
+                float distance = player == null ? float.NaN : Vector2.Distance(
+                    new Vector2(player.Position.X, player.Position.Z), new Vector2(npc.Position.X, npc.Position.Z));
+                bool hostile = flags.HasFlag(StatusFlags.Hostile);
+                bool party = flags.HasFlag(StatusFlags.PartyMember);
+                bool alliance = flags.HasFlag(StatusFlags.AllianceMember);
+                bool partyNpc = npc.BattleNpcKind == BattleNpcSubKind.NpcPartyMember;
+                bool friendlyNameplate = friendlyNameplateAddresses.Contains(npc.Address);
+                string outcome = player == null ? "Excluded: no local player"
+                    : !hostile ? "Excluded: Hostile flag not set"
+                    : friendlyNameplate ? "Excluded: UI3D nameplate classified as BattleNpcFriendly"
+                    : party || alliance || partyNpc ? "Excluded: party/alliance/NpcPartyMember"
+                    : npc.IsDead || !npc.IsTargetable ? "Excluded: dead or untargetable"
+                    : distance > radius ? "Excluded: outside detection radius"
+                    : "INCLUDED AS HOSTILE";
+                report.AppendLine($"Live detection outcome: {outcome}");
+                report.AppendLine($"Filter inputs: Hostile={hostile}; FriendlyNameplate={friendlyNameplate}; PartyMember={party}; AllianceMember={alliance}; NpcPartyMember={partyNpc}; Dead={npc.IsDead}; Targetable={npc.IsTargetable}; DistanceXZ={distance.ToString("F3", CultureInfo.InvariantCulture)}y");
+                report.AppendLine($"StatusFlags: {FormatDebugValue(flags)}; BattleNpcKind: {FormatDebugValue(npc.BattleNpcKind)}");
+                report.AppendLine($"TargetingPlayer={target != null && player != null && target.GameObjectId == player.GameObjectId}; EngagedElsewhere={target != null && player != null && target.GameObjectId != player.GameObjectId}");
+                report.AppendLine($"Resolved target: {(target == null ? "<null>" : $"{target.Name}; ObjectId={target.GameObjectId} (0x{target.GameObjectId:X16}); BaseId={target.BaseId}; Kind={target.ObjectKind}; Position={FormatDebugValue(target.Position)}")}");
+                report.AppendLine($"Botja AggroType: {MobAggroData.Classify(npc.BaseId)}");
+                if (npc.Address != 0)
+                {
+                    var native = (BattleChara*)npc.Address;
+                    report.AppendLine("Native BattleChara fields:");
+                    report.AppendLine($"  FateId={native->FateId}; ForayInfo.Level={native->ForayInfo.Level}");
+                    report.AppendLine($"  NamePlateIconId={native->NamePlateIconId}; TargetableStatus={native->TargetableStatus}");
+                    report.AppendLine($"  CurrentTargetStatus={native->CurrentTargetStatus}; NextTargetStatus={native->NextTargetStatus}; RenderFlags={native->RenderFlags}");
+                }
+            }
+            catch (Exception exception)
+            {
+                report.AppendLine($"Live/native diagnostic error: {exception.GetType().Name}: {exception.Message}");
+            }
+
+            report.AppendLine("All readable managed NPC interface properties:");
+            AppendObjectProperties(report, npc);
+            AppendNameplateDebugData(report, npc);
+        }
+
+        report.AppendLine();
+        report.AppendLine("END OF NPC DIAGNOSTIC EXPORT");
+        return report.ToString();
+    }
+
+    private void AppendNameplateDebugData(StringBuilder report, IGameObject gameObject)
+    {
+        report.AppendLine("NAMEPLATE DIAGNOSTICS");
+        if (gameObject.Address == 0)
+        {
+            report.AppendLine("  Native object unavailable.");
+            return;
+        }
+
+        try
+        {
+            var native = (FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject*)gameObject.Address;
+            report.AppendLine($"  Native EntityId=0x{native->EntityId:X8}; ObjectIndex={native->ObjectIndex}; Visibility={native->Visibility}; UpdateFlags={FormatDebugValue(native->UpdateFlags)}");
+            report.AppendLine($"  NamePlateIconId={native->NamePlateIconId}; RenderFlags={FormatDebugValue(native->RenderFlags)}; NameplateRenderBitSet={((ulong)native->RenderFlags & (1UL << 11)) != 0}");
+            report.AppendLine($"  NameplateOffset={native->NameplateOffset}; OffsetTarget={native->NameplateOffsetTarget}; OffsetScaleMultiplier={native->NameplateOffsetScaleMultiplier.ToString(CultureInfo.InvariantCulture)}");
+            try
+            {
+                byte colorType = native->GetNamePlateColorType();
+                var colors = native->GetNamePlateColors();
+                report.AppendLine($"  Native color category={colorType} ({NameplateColorCategory(colorType)}); PackedColors=0x{colors.Data:X16}");
+                report.AppendLine($"  Native text color=0x{colors.Data >> 32:X8}; Edge color=0x{(uint)colors.Data:X8}; TargetType={FormatDebugValue(native->GetTargetType())}");
+            }
+            catch (Exception exception)
+            {
+                report.AppendLine($"  Native nameplate getter error: {exception.GetBaseException().Message}");
+            }
+
+            var uiModule = UIModule.Instance();
+            if (uiModule == null)
+            {
+                report.AppendLine("  UIModule unavailable.");
+                return;
+            }
+
+            var ui3d = uiModule->GetUI3DModule();
+            var addon = (AddonNamePlate*)gameGui.GetAddonByName("NamePlate").Address;
+            report.AppendLine(addon == null ? "  NamePlate addon unavailable."
+                : $"  Addon=0x{(nint)addon:X}; Visible={addon->IsVisible}; ObjectArray=0x{(nint)addon->NamePlateObjectArray:X}");
+            if (ui3d != null)
+            {
+                report.AppendLine($"  UI3D nameplate object count={ui3d->NamePlateObjectInfoCount}");
+                bool infoFound = false;
+                for (int index = 0; index < ui3d->ObjectInfos.Length; index++)
+                {
+                    ref var info = ref ui3d->ObjectInfos[index];
+                    if (info.GameObject != native)
+                        continue;
+                    infoFound = true;
+                    report.AppendLine($"  UI3D ObjectInfo[{index}]: Kind={FormatDebugValue(info.NamePlateObjectKind)}; AdjustedKind={FormatDebugValue(info.NamePlateObjectKindAdjusted)}; PlateIndex={info.NamePlateIndex}; Scale={info.NamePlateScale}; SortPriority={info.SortPriority}");
+                    report.AppendLine($"    PlatePosition={info.NamePlatePos}; ProjectedPosition={info.ObjectPosProjectedScreenSpace}; CameraDistance={info.DistanceFromCamera}; PlayerDistance={info.DistanceFromPlayer}");
+                }
+                if (!infoFound)
+                    report.AppendLine("  No UI3D ObjectInfo matched this native object address.");
+
+                bool slotFound = false;
+                for (int slot = 0; slot < ui3d->NamePlateObjectIds.Length; slot++)
+                {
+                    if (ui3d->NamePlateObjectIds[slot].Id != gameObject.GameObjectId)
+                        continue;
+                    slotFound = true;
+                    report.AppendLine($"  UI3D plate slot[{slot}]: ObjectId=0x{ui3d->NamePlateObjectIds[slot].Id:X16}; WorkingObjectId=0x{ui3d->NamePlateObjectIds_2[slot].Id:X16}");
+                    if (addon == null || addon->NamePlateObjectArray == null || slot >= AddonNamePlate.NumNamePlateObjects)
+                        continue;
+                    var plate = &addon->NamePlateObjectArray[slot];
+                    report.AppendLine($"    Rendered plate: Kind={FormatDebugValue(plate->NamePlateKind)}; HPLabelState={plate->HPLabelState}; ClickThrough={plate->ClickThrough}; IsPvpEnemy={plate->IsPvpEnemy}; UseAttackCursor={plate->UseAttackCursor}");
+                    report.AppendLine($"    Priority={plate->Priority}; TextSize={plate->TextW}x{plate->TextH}; IconAdjust={plate->IconXAdjust},{plate->IconYAdjust}; NeedsToBeBaked={plate->NeedsToBeBaked}; DrawOriginalText={plate->DrawOriginalText}");
+                    report.AppendLine($"    Bake: IsBaked={plate->BakeData.IsBaked}; Alpha={plate->BakeData.Alpha}; Size={plate->BakeData.Width}x{plate->BakeData.Height}; UV={plate->BakeData.U},{plate->BakeData.V}; TextYOffset={plate->BakeData.TextYOffset}");
+                    report.AppendLine($"    Root=0x{(nint)plate->RootComponentNode:X}; RootVisible={(plate->RootComponentNode != null && plate->RootComponentNode->IsVisible())}; NameContainerVisible={(plate->NameContainer != null && plate->NameContainer->IsVisible())}; GaugeVisible={(plate->GaugeContainer != null && plate->GaugeContainer->IsVisible())}");
+                    if (plate->NameText != null)
+                    {
+                        var text = plate->NameText;
+                        report.AppendLine($"    NameText=\"{text->NodeText}\"; Visible={text->IsVisible()}; TextColor=0x{*(uint*)&text->TextColor:X8}; EdgeColor=0x{*(uint*)&text->EdgeColor:X8}");
+                    }
+                }
+                if (!slotFound)
+                    report.AppendLine("  No current UI3D plate slot matched this GameObjectId (hidden/off-screen/unallocated possible).");
+            }
+            else
+            {
+                report.AppendLine("  UI3DModule unavailable.");
+            }
+
+            var rapture = uiModule->GetRaptureAtkModule();
+            if (rapture != null)
+            {
+                bool found = false;
+                report.AppendLine($"  RaptureAtkModule NameplateInfoCount={rapture->NameplateInfoCount}");
+                for (int index = 0; index < rapture->NamePlateInfoEntries.Length; index++)
+                {
+                    ref var entry = ref rapture->NamePlateInfoEntries[index];
+                    if (entry.ObjectId.Id != gameObject.GameObjectId)
+                        continue;
+                    found = true;
+                    report.AppendLine($"  NamePlateInfo[{index}]: ObjectId=0x{entry.ObjectId.Id:X16}; Level={entry.Level}; ClassJobId={entry.ClassJobId}; Icon={entry.Icon}; Flags=0x{entry.Flags:X8}; IsPrefix={entry.IsPrefix}; IsDirty={entry.IsDirty}");
+                    report.AppendLine($"    Name=\"{entry.Name}\"; NameOverridePointer=0x{(nint)entry.NameOverride:X}; FcName=\"{entry.FcName}\"; Title=\"{entry.Title}\"; DisplayTitle=\"{entry.DisplayTitle}\"; LevelText=\"{entry.LevelText}\"");
+                }
+                if (!found)
+                    report.AppendLine("  No NamePlateInfo matched this GameObjectId.");
+            }
+
+            var stage = AtkStage.Instance();
+            var numberArray = stage == null ? null : stage->GetNumberArrayData(NumberArrayType.NamePlate);
+            var stringArray = stage == null ? null : stage->GetStringArrayData(StringArrayType.NamePlate);
+            if (numberArray == null || numberArray->IntArray == null || numberArray->Size < 1056)
+            {
+                report.AppendLine("  NamePlate number array unavailable or smaller than the expected layout.");
+                return;
+            }
+            var numbers = (NamePlateNumberArray*)numberArray->IntArray;
+            var strings = stringArray != null && stringArray->StringArray != null && stringArray->Size >= 300
+                ? (NamePlateStringArray*)stringArray->StringArray : null;
+            report.AppendLine($"  Number array: ActiveCount={numbers->ActiveNamePlateCount}; NamePlateSize={numbers->NamePlateSize}; StringArrayAvailable={strings != null}");
+            bool rowFound = false;
+            for (int row = 0; row < Math.Clamp(numbers->ActiveNamePlateCount, 0, numbers->ObjectData.Length); row++)
+            {
+                ref var data = ref numbers->ObjectData[row];
+                bool entityMatches = native->EntityId != 0 && native->EntityId != 0xE0000000 && data.EntityId == native->EntityId;
+                bool slotMatches = ui3d != null && data.NamePlateObjectIndex >= 0 && data.NamePlateObjectIndex < ui3d->NamePlateObjectIds.Length
+                    && ui3d->NamePlateObjectIds[data.NamePlateObjectIndex].Id == gameObject.GameObjectId;
+                if (!entityMatches && !slotMatches)
+                    continue;
+                rowFound = true;
+                report.AppendLine($"  Number row[{row}]: EntityId=0x{data.EntityId:X8}; PlateSlot={data.NamePlateObjectIndex}; EntityMatch={entityMatches}; SlotMatch={slotMatches}; Kind={FormatDebugValue(data.NamePlateKind)}; HPLabelState={data.HPLabelState}");
+                report.AppendLine($"    TextColor=0x{data.NameTextColor:X8}; EdgeColor=0x{data.NameEdgeColor:X8}; GaugeFillColor=0x{data.GaugeFillColor:X8}; GaugeContainerColor=0x{data.GaugeContainerColor:X8}; GaugeFillPercent={data.GaugeFillPercentage}");
+                report.AppendLine($"    UpdateFlags=0x{data.UpdateFlags:X8}; DrawFlags=0x{data.DrawFlags:X8}; VisibilityFlags=0x{data.VisibilityFlags:X8}");
+                report.AppendLine($"    DrawName={(data.VisibilityFlags & 1) != 0}; DrawGauge={(data.VisibilityFlags & 2) != 0}; UnchangedTimeline={(data.VisibilityFlags & 4) != 0}; GaugeEnabled={(data.DrawFlags & 0x20) != 0}; AttackCursor={(data.DrawFlags & 0x40) != 0}; PvpEnemy={(data.DrawFlags & 4) != 0}; HideTitle={(data.DrawFlags & 0x80) != 0}; PrefixTitle={(data.DrawFlags & 1) != 0}");
+                report.AppendLine($"    ScreenPosition={data.X},{data.Y}; Depth={data.Depth}; Scale={data.Scale}; NameIconId={data.NameIconId}; MarkerIconId={data.MarkerIconId}");
+                if (strings != null)
+                    report.AppendLine($"    String row[{row}]: Name=\"{strings->Name[row]}\"; Title=\"{strings->Title[row]}\"; Fc=\"{strings->Fc[row]}\"; Letter=\"{strings->Letter[row]}\"; Target=\"{strings->Target[row]}\"; Level=\"{strings->Level[row]}\"");
+            }
+            if (!rowFound)
+                report.AppendLine("  No active number/string row matched this NPC.");
+        }
+        catch (Exception exception)
+        {
+            report.AppendLine($"  Nameplate diagnostic error: {exception.GetType().Name}: {exception.GetBaseException().Message}");
+        }
+    }
+
+    private static string NameplateColorCategory(byte category) => category switch
+    {
+        0 => "Object", 1 => "Self", 2 => "Party", 3 => "Other player",
+        4 => "Limsa", 5 => "Gridania", 6 => "Ul'dah", 7 => "Unengaged enemy",
+        8 => "Dead", 9 => "Engaged enemy", 10 => "Claimed enemy", 11 => "Unclaimed enemy",
+        12 or 13 => "NPC", 14 => "Minion", 15 => "Self buddy", 16 => "Self pet",
+        17 => "Other buddy", 18 => "Other pet", 20 => "Alliance",
+        27 => "Tank", 28 => "Healer", 29 => "DPS", 30 => "Other class",
+        _ => "Unknown/hardcoded category"
+    };
+
+    private static void AppendObjectProperties(StringBuilder report, IGameObject? gameObject)
+    {
+        if (gameObject == null)
+        {
+            report.AppendLine("  <null>");
+            return;
+        }
+
+        var properties = gameObject.GetType().GetInterfaces()
+            .Where(contract => typeof(IGameObject).IsAssignableFrom(contract))
+            .SelectMany(contract => contract.GetProperties())
+            .Where(property => property.CanRead && property.GetIndexParameters().Length == 0)
+            .DistinctBy(property => property.Name)
+            .OrderBy(property => property.Name);
+        foreach (var property in properties)
+        {
+            try
+            {
+                var value = property.GetValue(gameObject);
+                report.AppendLine($"  {property.Name}: {FormatDebugValue(value)}");
+                if (value is not IEnumerable entries || value is string)
+                    continue;
+
+                int index = 0;
+                foreach (var entry in entries)
+                {
+                    if (index >= 128)
+                    {
+                        report.AppendLine("    <remaining entries omitted after 128>");
+                        break;
+                    }
+                    report.AppendLine($"    [{index++}]: {FormatDebugValue(entry)}");
+                    if (entry == null)
+                        continue;
+                    foreach (var entryProperty in entry.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                        .Where(candidate => candidate.CanRead && candidate.GetIndexParameters().Length == 0)
+                        .OrderBy(candidate => candidate.Name))
+                    {
+                        try
+                        {
+                            report.AppendLine($"      {entryProperty.Name}: {FormatDebugValue(entryProperty.GetValue(entry))}");
+                        }
+                        catch (Exception exception)
+                        {
+                            report.AppendLine($"      {entryProperty.Name}: <error: {exception.GetBaseException().Message}>");
+                        }
+                    }
+                }
+                report.AppendLine($"    Entries exported: {index}");
+            }
+            catch (Exception exception)
+            {
+                report.AppendLine($"  {property.Name}: <error: {exception.GetBaseException().Message}>");
+            }
+        }
+    }
+
+    private static string FormatDebugValue(object? value) => value switch
+    {
+        null => "<null>",
+        Enum enumValue => $"{enumValue} (decimal {enumValue.ToString("D")}, hex 0x{enumValue.ToString("X")})",
+        IGameObject gameObject => $"{gameObject.Name}; ObjectId={gameObject.GameObjectId} (0x{gameObject.GameObjectId:X16}); BaseId={gameObject.BaseId}; Kind={gameObject.ObjectKind}",
+        nint address => $"0x{address:X}",
+        Vector3 position => FormattableString.Invariant($"({position.X:F6}, {position.Y:F6}, {position.Z:F6})"),
+        IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture) ?? "<null>",
+        _ => value.ToString() ?? "<null>"
+    };
+
+}
+
+public partial class FateNavigationService
+{
+    // Debug state exposed to FateListWindow.
+    public string DebugPhase => phase.ToString();
+    public int DebugPhaseTicks => phaseTicks;
+    public Vector3 DebugPendingDestination => pendingDestination;
+    public string DebugPendingDestinationName => pendingDestinationName;
+    public Vector3 DebugPendingSourceShardPos => pendingSourceShardPos;
+    public Vector3 DebugPendingDestShardPos => pendingDestShardPos;
+    public bool DebugVnavIsPathfinding => SafeIsPathfinding();
+    public bool DebugVnavIsRunning => SafeIsRunning();
+    public bool DebugVnavIsNavmeshReady => SafeIsNavmeshReady();
+    public int DebugVnavPathWaypointCount => SafeGetPathWaypoints().Count;
+    public bool DebugLifestreamBusy => SafeIsBusy();
 }

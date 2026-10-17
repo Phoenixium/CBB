@@ -20,13 +20,12 @@ namespace Botja.Services;
 // Mirrors BOCCHI's AethernetData — PlaceName row ID + world position.
 internal record struct AethernetShard(uint PlaceNameId, Vector3 Position);
 
-public class FateNavigationService(
+public partial class FateNavigationService(
     IDalamudPluginInterface pluginInterface,
     IVNavmeshIpc vnav,
     ILifestreamIpc lifestream,
     IClientState clientState,
     IObjectTable objects,
-    ITargetManager targets,
     IPlayer player,
     IOverlayRenderer overlay,
     NavigationConfig navigationConfig,
@@ -36,6 +35,9 @@ public class FateNavigationService(
 ) : IOnUpdate, IOnRender
 {
     private readonly ICallGateSubscriber<bool> navIsReady = pluginInterface.GetIpcSubscriber<bool>("vnavmesh.Nav.IsReady");
+    // Not wrapped by Ocelot's IVNavmeshIpc — the real live polyline vnav is currently following,
+    // distinct from any straight-line target we asked it to walk to (see SafeGetPathWaypoints).
+    private readonly ICallGateSubscriber<List<Vector3>> pathListWaypoints = pluginInterface.GetIpcSubscriber<List<Vector3>>("vnavmesh.Path.ListWaypoints");
 
     // Occult Crescent field aetheryte data sourced from BOCCHI zone definitions.
     private static readonly IReadOnlyDictionary<ushort, IReadOnlyList<AethernetShard>> ZoneAetherytes =
@@ -52,7 +54,7 @@ public class FateNavigationService(
             // Zadnor  (Camp Vrdelnis is the main aetheryte)
             [975] = new AethernetShard[]
             {
-                new(3664, new Vector3(679.682f, 297.291f, 660.028f)), // Camp Vrdelnis
+                new(3664, new Vector3(679.6825f, 297.2915f, 660.0288f)), // Camp Vrdelnis
                 new(3665, new Vector3(-356.466f, 286.030f, 758.449f)), // Zuprtik Point
                 new(3666, new Vector3(-689.387f, 276.539f, -292.164f)), // Ljeban Point
                 new(3667, new Vector3( 106.370f, 300.953f,  -130.815f)), // Hrmovir Point
@@ -63,7 +65,7 @@ public class FateNavigationService(
     // From BOCCHI NavigationConstants
     private const float MaxDirectWalkDistance = 80f;
     private const float EventArrivalRadius = 10f;
-    private const float ShardInteractRadius = 3f;
+    private const float ShardInteractRadius = 2f;
     // Wider than ShardInteractRadius — matches BOCCHI's IsAlreadyAtAetheryte arrivedRadius
     // (post-TP landings and menu-open range are often several yards from the crystal).
     private const float ArrivedAtAetheryteRadius = 12f;
@@ -90,11 +92,6 @@ public class FateNavigationService(
     private const int MaxTeleportFailFastRetries = 3;
     private const long NavmeshReadyTimeoutMs = 30_000; // matches BOCCHI's PathfindToChain NavmeshReadyTimeout
     private const long NavmeshReadyMinMs = 250; // give IsNavmeshReady a moment to drop after zone load
-    // When a teleport gives up specifically because we're stuck InCombat, try to let auto-rotation
-    // kill whatever's attacking first, then fall back to running away from it until it deaggros.
-    private const long CombatFightGraceMs = 20_000;
-    private const long CombatFleeTimeoutMs = 30_000;
-    private const float CombatFleeDistance = 25f; // yalms to run away per flee attempt
     // Rough average movement speed for ETA estimates (accounts for mount ramp-up/dismount time).
     private const float EstimatedMoveSpeed = 10f; // yalms/sec
     private const float EstimatedTeleportOverheadSeconds = 5f; // menu + animation overhead for an aethernet hop
@@ -103,12 +100,13 @@ public class FateNavigationService(
     // proof it actually happened. Aethernet shards in Bozja are always much further apart than this.
     private const float TeleportJumpThreshold = 15f;
 
-    private enum TeleportPhase { None, WalkingToSourceShard, WaitingForStart, WaitingForEnd, Settling, WalkingToDestination, ResolvingCombat }
+    private enum TeleportPhase { None, WalkingToSourceShard, WaitingForStart, WaitingForEnd, Settling, WalkingToDestination }
 
     private static readonly Color ShardPathColor = new(0.3f, 0.6f, 1f); // blue — walking to source shard
     private static readonly Color TeleportWaitColor = new(1f, 0.8f, 0.1f); // yellow — teleport in progress
     private static readonly Color FinalPathColor = new(0.2f, 1f, 0.3f); // green — final walk to goal
     private static readonly Color AvoidanceSteerColor = new(1f, 0.1f, 0.8f); // magenta — hostile-avoidance steering target
+    private static readonly Color VnavRealPathColor = new(1f, 1f, 1f); // white — vnav's own live path, not Botja's plan
 
     private const long HeartbeatIntervalMs = 1_000; // log a state snapshot this often during waits
     private const long WalkToDestinationTimeoutMs = 60_000; // ~60s safety timeout
@@ -174,10 +172,41 @@ public class FateNavigationService(
     // case — require this many consecutive ms of failed replans (not a single bad frame) before
     // surfacing IsAvoidanceStuck and stopping movement, so one flaky scan tick can't false-trigger it.
     private const long AvoidanceStuckConfirmMs = 1_000;
+    // Same debounce idea as AvoidanceStuckConfirmMs, but for the opposite transition: a single tick
+    // reporting zero route-relevant obstacles (e.g. a live-position jitter nudging a borderline
+    // hostile across the inclusion threshold for one frame) must not tear down an already-good plan
+    // and force a full replan+restart the very next tick it reappears — confirmed via a real repro
+    // log showing "noPlanYet=True" on literally every replan for 1785 consecutive ticks with zero
+    // player movement, i.e. the plan was being destroyed and rebuilt from scratch every single tick.
+    private const long AvoidanceObstaclesGoneConfirmMs = 500;
+    // Same idea again, for segmentBlocked specifically: AnyRealPathSegmentBlocked checks vnav's OWN
+    // live path, which depends on whichever waypoint we last commanded it toward — so replanning to
+    // a different waypoint changes that live path, which can flip segmentBlocked back on, which
+    // replans again, forever. Confirmed via a real repro log: two different N/N+2-obstacle plans
+    // alternating every single tick (each one "blocked" by the other's own live-path side effect)
+    // with the player frozen in place the whole time. Requiring this much sustained agreement before
+    // acting lets vnav's live path settle on the currently-committed target first.
+    private const long AvoidanceSegmentBlockedConfirmMs = 300;
+    // Caps how much of vnav's real path (the "white line") feeds into the obstacle planner's search
+    // area — only the nearby curvature can matter for shaping a detour; without this, a long-distance
+    // real route bowing out far from the straight line (e.g. a mountain pass midway through a
+    // thousand-yalm journey) would balloon the search box far past where any obstacle could matter.
+    private const float AvoidanceSpineLookaheadYalms = 100f;
     // Bounds retries of a single avoidance waypoint vnav genuinely can't reach (confirmed via real
     // repro logs of the removed mesh-snap pre-check) — matches MaxMovementStallRetries' role for the
     // non-avoidance phases, just scoped to one waypoint instead of a whole phase.
     private const int MaxAvoidanceStallRetries = 3;
+    // Separate, waypoint-identity-independent safety net: AvoidanceStallRetries resets on any
+    // cosmetically different waypoint (even a few cm apart from hostile jitter), so a terrain gap
+    // the planner keeps routing through (confirmed via real repro logs: vnav's own pathfind failing
+    // outright, "failed to find polygon on a mesh", for a whole corridor of nearly-identical dead
+    // points) can retry forever without ever tripping that counter, since every attempt looks "new".
+    // This instead watches real progress toward the actual destination regardless of which waypoint
+    // produced it — matches the historical 10s precedent from this file's earlier avoidance designs.
+    private const long AvoidanceProgressTimeoutMs = 10_000;
+    // Ignore remaining-distance noise below this (route recompute jitter, sub-yalm position drift)
+    // so a route that's merely holding steady isn't mistaken for "still improving".
+    private const float AvoidanceProgressEpsilonYalms = 1f;
 
     private TeleportPhase phase;
     private Vector3 pendingDestination;
@@ -194,13 +223,6 @@ public class FateNavigationService(
     private long lastMoveIssuedMs;
     private int movementStallRetries;
     private int teleportFailFastRetries;
-    private Vector3 combatResolveDestination;
-    private bool combatResolveFleeing;
-    // Bounds ResolvingCombat to a single attempt per navigation request — without this, a hop that
-    // keeps failing while genuinely stuck in combat (no rotation plugin to kill it, can't outrun it)
-    // would loop through fight/flee forever and never actually get us there.
-    private bool combatResolveAttempted;
-    private bool resumingAfterCombatResolve;
     // Current detour route (real world XZ waypoints, last one always the real destination) — null
     // means "no obstacle currently requires a detour". Driven waypoint-by-waypoint via
     // vnav.PathfindAndMoveCloseTo — vnav.FollowPath ("Path.MoveTo", whole polyline in one call) was
@@ -214,6 +236,19 @@ public class FateNavigationService(
     // 0 while replanning is succeeding; set to the first failure's timestamp once it starts failing,
     // so IsAvoidanceStuck only fires after AvoidanceStuckConfirmMs of sustained failure, not one blip.
     private long avoidanceNoPathSinceMs;
+    // Mirrors avoidanceNoPathSinceMs for the opposite case — 0 while obstacles are present, set to
+    // the first all-clear tick's timestamp once obstacles.Count hits 0, so a real plan isn't dropped
+    // over a single blip tick (see AvoidanceObstaclesGoneConfirmMs).
+    private long obstaclesGoneSinceMs;
+    // 0 while the current plan looks clear; set to the first tick it looks blocked, so a genuinely
+    // transient/self-inflicted blip (see AvoidanceSegmentBlockedConfirmMs) can't force a replan alone.
+    private long segmentBlockedSinceMs;
+    // Best (smallest) remaining distance to the real destination seen so far this avoidance episode,
+    // and when it was last meaningfully improved — see AvoidanceProgressTimeoutMs.
+    private float avoidanceBestRemainingDist = float.MaxValue;
+    private long avoidanceLastProgressMs;
+    // Logs the no-progress warning once per stuck episode instead of spamming every tick.
+    private bool avoidanceNoProgressWarned;
     // Consecutive stalled retries of the CURRENT avoidance waypoint — reset whenever the waypoint
     // itself changes (a new waypoint deserves a fresh chance), not on every replan.
     private int avoidanceStallRetries;
@@ -227,25 +262,9 @@ public class FateNavigationService(
     private static long NowMs() => Environment.TickCount64;
     private long PhaseElapsedMs => NowMs() - phaseStartMs;
 
-    // Debug state for the UI (FateListWindow) to display.
-    public string DebugPhase => phase.ToString();
-    public int DebugPhaseTicks => phaseTicks;
-    public Vector3 DebugPendingDestination => pendingDestination;
-    public string DebugPendingDestinationName => pendingDestinationName;
-    public Vector3 DebugPendingSourceShardPos => pendingSourceShardPos;
-    public Vector3 DebugPendingDestShardPos => pendingDestShardPos;
-    public bool DebugVnavIsPathfinding => SafeIsPathfinding();
-    public bool DebugVnavIsRunning => SafeIsRunning();
-    public bool DebugVnavIsNavmeshReady => SafeIsNavmeshReady();
-    public bool DebugLifestreamBusy => SafeIsBusy();
-
     // True while any navigation phase (walk/teleport hop/settle) is in progress — used by
     // CombatControlService to hold off auto-rotation while we're travelling, not fighting.
     public bool IsNavigating => phase != TeleportPhase.None;
-
-    // True while ResolvingCombat is trying to fight off whatever blocked a teleport — CombatControlService
-    // treats this the same as "arrived and fighting" so the rotation plugin is allowed to help clear it.
-    public bool IsResolvingCombat => phase == TeleportPhase.ResolvingCombat;
 
     // True when no route exists that avoids every nearby sight/sound aggro radius — those are hard
     // limits, so movement is stopped instead of falling back to an unsafe direct walk.
@@ -401,25 +420,12 @@ public class FateNavigationService(
         if (!isRetry)
             teleportFailFastRetries = 0;
 
-        // A resumed attempt after ResolvingCombat is still part of the same journey — don't let it
-        // reset the one-shot guard, or a persistently-uncleared combat state could loop forever.
-        if (!isRetry && !resumingAfterCombatResolve)
-            combatResolveAttempted = false;
-
-        // Don't even interact with the aethernet crystal while InCombat — Lifestream refuses the hop
-        // anyway, so check up front instead of reactively discovering that after a round of retries.
+        // Lifestream refuses aethernet teleports while InCombat — walking is unaffected by combat, so
+        // just keep moving toward the destination directly instead of pausing to wait it out.
         if (player.Conditions[ConditionFlag.InCombat])
         {
-            if (combatResolveAttempted)
-            {
-                log.Debug("[FateNav] PathViaAethernet({Destination}): still in combat after resolving once this journey, giving up on the teleporter and walking instead", destination);
-                PathTo(destination);
-                return;
-            }
-
-            log.Debug("[FateNav] PathViaAethernet({Destination}): in combat, resolving combat before interacting with the teleporter", destination);
-            combatResolveAttempted = true;
-            StartResolvingCombat(destination);
+            log.Debug("[FateNav] PathViaAethernet({Destination}): in combat, teleporter unusable — walking directly instead", destination);
+            PathTo(destination);
             return;
         }
 
@@ -558,18 +564,104 @@ public class FateNavigationService(
 
         var relevantHostiles = hostileDetection.GetRouteRelevantHostiles(
             currentPos, destination, hostileDetectionConfig.SoundAggroRangeYalms, hostileDetectionConfig.AvoidanceSafetyMarginYalms);
+
+        // vnav's own live path (the "white line") can curve away from the straight line above due to
+        // real terrain — check it too, in parallel, so a hostile near the ACTUAL route is never
+        // missed just because it sits off the idealized straight line to the destination. Also kept
+        // around below to shape the obstacle planner's search area around the real route's curvature
+        // instead of an idealized straight line (never as a literal move target — see ObstaclePathPlanner.FindPath).
+        List<Vector3> realPath = SafeGetPathWaypoints();
+        if (realPath.Count > 0)
+        {
+            List<Vector3> polyline = [currentPos, .. realPath];
+            var realPathHostiles = hostileDetection.GetHostilesNearPath(
+                polyline, hostileDetectionConfig.SoundAggroRangeYalms, hostileDetectionConfig.AvoidanceSafetyMarginYalms);
+            if (realPathHostiles.Count > 0)
+            {
+                var seenIds = relevantHostiles.Select(h => h.ObjectId).ToHashSet();
+                relevantHostiles = relevantHostiles.Concat(realPathHostiles.Where(h => !seenIds.Contains(h.ObjectId))).ToList();
+            }
+        }
+
+        // Trimmed to the nearby lookahead only (see AvoidanceSpineLookaheadYalms) — passed to
+        // FindPath purely to shape its search area, never as a move target.
+        List<Vector3> realPathSpine = [];
+        {
+            float traveled = 0f;
+            Vector3 prev = currentPos;
+            foreach (var point in realPath)
+            {
+                traveled += Dist2D(prev, point);
+                realPathSpine.Add(point);
+                prev = point;
+                if (traveled >= AvoidanceSpineLookaheadYalms)
+                    break;
+            }
+        }
+
         var obstacles = BuildObstacles(relevantHostiles);
 
         if (obstacles.Count == 0)
         {
-            // Nothing nearby to avoid — hand back to the caller's own direct StartMove, which has a
-            // tighter/more precise arrival check for the real destination than a detour plan needs.
-            ClearAvoidancePlan();
-            return false;
+            // Don't tear down an existing, already-good plan the instant a single tick reports zero
+            // obstacles — only hand control back to the caller's own direct StartMove once that's
+            // held for a sustained window (see AvoidanceObstaclesGoneConfirmMs for why).
+            if (plannedAvoidancePath == null)
+                return false;
+
+            if (obstaclesGoneSinceMs == 0)
+                obstaclesGoneSinceMs = NowMs();
+
+            if (NowMs() - obstaclesGoneSinceMs <= AvoidanceObstaclesGoneConfirmMs)
+            {
+                // Still within the grace window — fall through below and keep following the existing
+                // plan rather than reacting to one single all-clear tick.
+            }
+            else
+            {
+                ClearAvoidancePlan();
+                return false;
+            }
+        }
+        else
+        {
+            obstaclesGoneSinceMs = 0;
+        }
+
+        // Diagnostic-only, doesn't alter movement: avoidanceStallRetries resets on any cosmetically
+        // different waypoint (even sub-yalm hostile jitter), so a genuine terrain gap the planner
+        // keeps routing through regardless of the exact waypoint (confirmed via real repro logs:
+        // vnav's own pathfind failing outright, "failed to find polygon on a mesh", for a whole
+        // corridor of nearly-identical dead points) can retry forever without that counter ever
+        // tripping, since every attempt looks "new". This instead watches real progress toward the
+        // actual destination regardless of which waypoint produced it.
+        if (remainingDist < avoidanceBestRemainingDist - AvoidanceProgressEpsilonYalms)
+        {
+            avoidanceBestRemainingDist = remainingDist;
+            avoidanceLastProgressMs = NowMs();
+            avoidanceNoProgressWarned = false;
+        }
+        else if (avoidanceLastProgressMs == 0)
+        {
+            avoidanceLastProgressMs = NowMs();
+        }
+        else if (!avoidanceNoProgressWarned && NowMs() - avoidanceLastProgressMs > AvoidanceProgressTimeoutMs)
+        {
+            avoidanceNoProgressWarned = true;
+            log.Warning("[FateNav] Hostile avoidance: no real progress toward {Destination} for over {TimeoutMs}ms despite repeated replans — likely routing through terrain vnav can't actually reach",
+                destination, AvoidanceProgressTimeoutMs);
         }
 
         bool noPlanYet = plannedAvoidancePath == null;
-        bool segmentBlocked = !noPlanYet && AnyPlanSegmentBlocked(obstacles);
+        // Checks the real vnav route too, not just the flat plan's idealized straight segments — a
+        // flat segment can look clear while the real terrain-following detour to walk it swings
+        // closer to a hostile than the straight-line check ever accounted for.
+        bool rawSegmentBlocked = !noPlanYet && (AnyPlanSegmentBlocked(obstacles) || AnyRealPathSegmentBlocked(currentPos, obstacles));
+        if (!rawSegmentBlocked)
+            segmentBlockedSinceMs = 0;
+        else if (segmentBlockedSinceMs == 0)
+            segmentBlockedSinceMs = NowMs();
+        bool segmentBlocked = rawSegmentBlocked && NowMs() - segmentBlockedSinceMs > AvoidanceSegmentBlockedConfirmMs;
         bool timerDue = !noPlanYet && !segmentBlocked && NowMs() - lastAvoidancePlanMs > AvoidanceReplanIntervalMs;
         bool hostilesMoved = timerDue && HostilesChangedSincePlan(relevantHostiles);
         bool needsReplan = noPlanYet || segmentBlocked || (timerDue && hostilesMoved);
@@ -583,7 +675,7 @@ public class FateNavigationService(
             log.Debug("[FateNav] Hostile avoidance: replanning (noPlanYet={NoPlanYet}, segmentBlocked={SegmentBlocked}, hostilesMoved={HostilesMoved})",
                 noPlanYet, segmentBlocked, hostilesMoved);
             lastAvoidancePlanMs = NowMs();
-            List<Vector3>? path = ObstaclePathPlanner.FindPath(currentPos, destination, obstacles, hostileDetectionConfig.AvoidanceComfortDistanceYalms);
+            List<Vector3>? path = ObstaclePathPlanner.FindPath(currentPos, destination, obstacles, hostileDetectionConfig.AvoidanceComfortDistanceYalms, realPathSpine);
             if (path == null)
             {
                 if (avoidanceNoPathSinceMs == 0)
@@ -617,6 +709,12 @@ public class FateNavigationService(
             else
             {
                 avoidanceNoPathSinceMs = 0;
+                // A fresh plan deserves a fresh debounce window too — without this, once the first
+                // blip crossed AvoidanceSegmentBlockedConfirmMs a single time, segmentBlockedSinceMs
+                // was never reset, so every tick after kept reading as "already over the threshold"
+                // forever, bypassing the debounce entirely (confirmed via a real repro log: a replan
+                // storm every ~15ms, literally every tick, for over half a second straight).
+                segmentBlockedSinceMs = 0;
                 IsAvoidanceStuck = false;
                 // A genuinely new plan deserves a fresh chance — without this, a waypoint that kept
                 // recomputing to the same dead value across several replans (each one resetting
@@ -647,6 +745,15 @@ public class FateNavigationService(
         }
 
         Vector3 waypoint = plan[avoidanceWaypointIndex];
+        // Deliberately always the flat plan node, NOT a vnav real-path sub-node — tried that
+        // (steering to vnav's next live-path waypoint instead) and confirmed it causes big loops:
+        // once vnav reaches a close sub-node it goes idle, Path.ListWaypoints empties, and the code
+        // falls back to re-commanding this SAME far node from the new position — recomputing a fresh
+        // real route every few yalms that can diverge enough to send the character backward. A single
+        // long-range PathfindAndMoveCloseTo call lets vnav walk its own real route autonomously
+        // instead of being interrupted and re-pathed constantly. The real path is still consulted
+        // for safety (AnyRealPathSegmentBlocked above), just never as the literal move target.
+
         // Advancing to a genuinely new INDEX in the plan must always count as a change, even if that
         // waypoint happens to sit close to the previous one (common near an obstacle, where the
         // planner can't always take a big shortcut) — confirmed as a real repro'd stuck cause: with
@@ -704,7 +811,12 @@ public class FateNavigationService(
         lastIssuedAvoidanceWaypoint = new Vector3(float.MaxValue, 0f, float.MaxValue);
         lastIssuedAvoidanceWaypointIndex = -1;
         avoidanceNoPathSinceMs = 0;
+        obstaclesGoneSinceMs = 0;
+        segmentBlockedSinceMs = 0;
         avoidanceStallRetries = 0;
+        avoidanceBestRemainingDist = float.MaxValue;
+        avoidanceLastProgressMs = 0;
+        avoidanceNoProgressWarned = false;
         IsAvoidanceStuck = false;
         lastPlanHostileSnapshot = [];
     }
@@ -758,6 +870,28 @@ public class FateNavigationService(
         {
             if (ObstaclePathPlanner.IsSegmentBlocked(plan[i], plan[i + 1], obstacles))
                 return true;
+        }
+
+        return false;
+    }
+
+    // Same obstacle test as AnyPlanSegmentBlocked, but against vnav's REAL route (what's actually
+    // about to be walked) instead of the flat planner's idealized straight segments.
+    private bool AnyRealPathSegmentBlocked(Vector3 currentPos, IReadOnlyList<PathObstacle> obstacles)
+    {
+        if (obstacles.Count == 0)
+            return false;
+
+        var realPath = SafeGetPathWaypoints();
+        if (realPath.Count == 0)
+            return false;
+
+        Vector3 prev = currentPos;
+        foreach (var point in realPath)
+        {
+            if (ObstaclePathPlanner.IsSegmentBlocked(prev, point, obstacles))
+                return true;
+            prev = point;
         }
 
         return false;
@@ -1089,39 +1223,6 @@ public class FateNavigationService(
                 }
             }
         }
-        else if (phase == TeleportPhase.ResolvingCombat)
-        {
-            if (!player.Conditions[ConditionFlag.InCombat])
-            {
-                log.Debug("[FateNav] Update: ResolvingCombat cleared after {Ticks} ticks ({ElapsedMs}ms, fleeing={Fleeing}), retrying teleport", phaseTicks, PhaseElapsedMs, combatResolveFleeing);
-                resumingAfterCombatResolve = true;
-                PathViaAethernet(combatResolveDestination);
-                resumingAfterCombatResolve = false;
-                return;
-            }
-
-            if (!combatResolveFleeing)
-            {
-                if (PhaseElapsedMs > CombatFightGraceMs)
-                {
-                    // Still in combat after letting auto-rotation try to kill it — put distance
-                    // between us and whatever's attacking instead of fighting indefinitely.
-                    combatResolveFleeing = true;
-                    Vector3 fleeTarget = ComputeFleeTarget();
-                    log.Debug("[FateNav] Update: ResolvingCombat still in combat after {ElapsedMs}ms, fleeing to {FleeTarget}", PhaseElapsedMs, fleeTarget);
-                    StartMove(fleeTarget, EventArrivalRadius);
-                    phaseStartMs = NowMs(); // restart the clock for the flee timeout below
-                }
-
-                return;
-            }
-
-            if (PhaseElapsedMs > CombatFleeTimeoutMs)
-            {
-                log.Debug("[FateNav] Update: ResolvingCombat gave up fleeing after {ElapsedMs}ms, still in combat, falling back to direct walk", PhaseElapsedMs);
-                PathTo(combatResolveDestination);
-            }
-        }
     }
 
     private void CancelPending()
@@ -1145,48 +1246,11 @@ public class FateNavigationService(
             log.Debug("[FateNav] {Reason}, retrying aethernet hop ({Retry}/{Max})", reason, teleportFailFastRetries, MaxTeleportFailFastRetries);
             PathViaAethernet(destination, isRetry: true);
         }
-        else if (!combatResolveAttempted && player.Conditions[ConditionFlag.InCombat])
-        {
-            // Lifestream refuses to teleport while InCombat — that's very likely why every retry
-            // above failed the same way. Walking off mid-fight is a bad fallback too; try to clear
-            // the fight (or put distance between us and it) before attempting the hop again. Only
-            // once per journey (see combatResolveAttempted) so a fight/flee that never resolves can't
-            // loop forever — it still falls through to the direct-walk fallback below eventually.
-            log.Debug("[FateNav] {Reason} after {Retries} retries and still in combat, resolving combat before retrying", reason, teleportFailFastRetries);
-            combatResolveAttempted = true;
-            StartResolvingCombat(destination);
-        }
         else
         {
             log.Debug("[FateNav] {Reason} after {Retries} retries, falling back to direct walk", reason, teleportFailFastRetries);
             PathTo(destination);
         }
-    }
-
-    // Give auto-rotation a chance to kill whatever's attacking us; if we're still in combat after a
-    // grace period, run away from it instead, then retry the original teleport once combat clears.
-    private void StartResolvingCombat(Vector3 destination)
-    {
-        combatResolveDestination = destination;
-        combatResolveFleeing = false;
-        phase = TeleportPhase.ResolvingCombat;
-        phaseTicks = 0;
-        phaseStartMs = NowMs();
-    }
-
-    // Flees directly away from the current target (almost always whatever's attacking us in this
-    // situation); falls back to retreating toward where we stood before the teleport attempt, then to
-    // an arbitrary direction, if there's no target to read a threat position from.
-    private Vector3 ComputeFleeTarget()
-    {
-        Vector3 playerPos = objects.LocalPlayer?.Position ?? pendingPreTeleportPos;
-        Vector3 threatPos = targets.Target?.Position ?? pendingPreTeleportPos;
-
-        Vector3 away = new(playerPos.X - threatPos.X, 0f, playerPos.Z - threatPos.Z);
-        if (away.LengthSquared() < 1f)
-            away = new Vector3(1f, 0f, 0f);
-
-        return playerPos + Vector3.Normalize(away) * CombatFleeDistance;
     }
 
     // Periodic full-state snapshot so a stuck/looping phase is visible in the log without needing a breakpoint.
@@ -1242,6 +1306,12 @@ public class FateNavigationService(
         catch (Exception ex) { log.Warning(ex, "[FateNav] vnav.IsRunning() failed"); return false; }
     }
 
+    private List<Vector3> SafeGetPathWaypoints()
+    {
+        try { return pathListWaypoints.HasFunction ? pathListWaypoints.InvokeFunc() : []; }
+        catch (Exception ex) { log.Warning(ex, "[FateNav] vnav.Path.ListWaypoints() failed"); return []; }
+    }
+
     private void SafeStopVnav()
     {
         try { vnav.Stop(); }
@@ -1266,7 +1336,20 @@ public class FateNavigationService(
 
         if (player.IsMounted() || player.IsMounting()) return;
         if (Dist2D(player.Position, destination) < navigationConfig.MountRange) return;
-        if (inCombat || player.IsCasting() || player.IsBetweenAreas() || player.IsInteracting()) return;
+        if (player.IsCasting() || player.IsBetweenAreas() || player.IsInteracting()) return;
+
+        // Mounting is blocked outright while fighting — sprint instead so combat doesn't reduce
+        // travel to base run speed for however long it takes to clear.
+        if (inCombat)
+        {
+            if (Actions.Sprint.CanCast())
+            {
+                try { Actions.Sprint.Cast(); }
+                catch (Exception ex) { log.Warning(ex, "[FateNav] Sprint cast failed"); }
+            }
+            return;
+        }
+
         if (!Actions.MountRoulette.CanCast()) return;
 
         log.Debug("[FateNav] TryMount: casting MountRoulette");
@@ -1309,6 +1392,18 @@ public class FateNavigationService(
             {
                 overlay.StrokeLine(prev, point, AvoidanceSteerColor);
                 overlay.StrokeCircle(point, 1.5f, AvoidanceSteerColor);
+                prev = point;
+            }
+        }
+
+        // vnav's own real route to whatever target we last gave it — can diverge from the lines
+        // above around terrain our own plan has no awareness of.
+        if (SafeGetPathWaypoints() is { Count: > 0 } realPath)
+        {
+            Vector3 prev = from;
+            foreach (var point in realPath)
+            {
+                overlay.StrokeLine(prev, point, VnavRealPathColor);
                 prev = point;
             }
         }

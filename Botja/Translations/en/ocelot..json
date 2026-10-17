@@ -53,8 +53,11 @@
     "auto_mode": {
       "label": "Auto Mode",
       "fields": {
-        "only_critical_engagements": {
-          "label": "Only do Critical Engagements"
+        "do_critical_engagements": {
+          "label": "Do Critical Engagements"
+        },
+        "do_fates": {
+          "label": "Do FATEs"
         }
       }
     },
