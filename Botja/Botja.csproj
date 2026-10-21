@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
-    <Version>0.0.0.5</Version>
+    <Version>0.0.5</Version>
     <Author>Phoenixium</Author>
     <Name>Botja</Name>
-    <Punchline>A short one-liner that shows up in /xlplugins.</Punchline>
-    <Description>A brief overview of what Botja does.</Description>
+    <Punchline>FATE and CE tool for Bozja and Zadnor</Punchline>
+    <Description>Automate fate travel, CE joining, opening chests and fragements, turn in Field notes and MORE!</Description>
     <RepoUrl>https://github.com/Phoenixium/CBB</RepoUrl>
   </PropertyGroup>
   <ItemGroup>

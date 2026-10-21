@@ -1,0 +1,44 @@
+name: Build Botja (Linux)
+
+on:
+  push:
+    branches:
+      - "**"
+    paths-ignore:
+      - pluginmaster.json
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository and submodules
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Install .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Download Dalamud
+        shell: bash
+        run: |
+          curl --fail --location --retry 3 \
+            https://goatcorp.github.io/dalamud-distrib/latest.zip \
+            --output "$RUNNER_TEMP/dalamud.zip"
+          mkdir -p "$RUNNER_TEMP/dalamud"
+          unzip -q -o "$RUNNER_TEMP/dalamud.zip" -d "$RUNNER_TEMP/dalamud"
+
+      - name: Build
+        run: dotnet build Botja/Botja.csproj --configuration Release -p:DalamudLibPath="$RUNNER_TEMP/dalamud/"
+
+      - name: Upload build output
+        uses: actions/upload-artifact@v4
+        with:
+          name: Botja-Release-Linux
+          path: Botja/bin/Release/
+          if-no-files-found: error

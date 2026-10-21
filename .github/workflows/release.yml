@@ -1,0 +1,82 @@
+name: Release Botja
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository and submodules
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Install .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Verify tag matches project version
+        shell: bash
+        run: |
+          project_version="$(dotnet msbuild Botja/Botja.csproj -getProperty:Version)"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [[ "$project_version" != "$tag_version" ]]; then
+            echo "Tag version $tag_version does not match Botja.csproj version $project_version"
+            exit 1
+          fi
+
+      - name: Download Dalamud
+        shell: bash
+        run: |
+          curl --fail --location --retry 3 \
+            https://goatcorp.github.io/dalamud-distrib/latest.zip \
+            --output "$RUNNER_TEMP/dalamud.zip"
+          mkdir -p "$RUNNER_TEMP/dalamud"
+          unzip -q -o "$RUNNER_TEMP/dalamud.zip" -d "$RUNNER_TEMP/dalamud"
+
+      - name: Build release package
+        run: dotnet build Botja/Botja.csproj --configuration Release -p:DalamudLibPath="$RUNNER_TEMP/dalamud/"
+
+      - name: Stage plugin package
+        shell: bash
+        run: |
+          package="Botja/bin/Release/Botja/latest.zip"
+          test -f "$package"
+          cp "$package" "$RUNNER_TEMP/Botja.zip"
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: ${{ runner.temp }}/Botja.zip
+
+      - name: Checkout plugin index branch
+        uses: actions/checkout@v5
+        with:
+          ref: master
+          path: plugin-index
+
+      - name: Update plugin index
+        shell: bash
+        env:
+          DOWNLOAD_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/Botja.zip
+        run: |
+          jq --arg install "$DOWNLOAD_URL" --arg update "$DOWNLOAD_URL" \
+            '[. + {DownloadLinkInstall: $install, DownloadLinkUpdate: $update}]' \
+            Botja/bin/Release/Botja.json > plugin-index/pluginmaster.json
+          cd plugin-index
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pluginmaster.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Update Botja plugin index for ${GITHUB_REF_NAME}"
+            git push origin HEAD:master
+          fi
