@@ -5,7 +5,9 @@ on:
     branches:
       - "**"
     paths-ignore:
+      - ".gitignore"
       - pluginmaster.json
+      - ".github/workflows/**"
   pull_request:
   workflow_dispatch:
 

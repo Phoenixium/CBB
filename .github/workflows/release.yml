@@ -3,7 +3,7 @@ name: Release Botja
 on:
   push:
     tags:
-      - "v*"
+      - "*"
 
 permissions:
   contents: write
