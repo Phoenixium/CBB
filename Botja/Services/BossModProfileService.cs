@@ -8,7 +8,7 @@ namespace Botja.Services;
 public sealed class BossModProfileService(IDalamudPluginInterface plugin)
 {
     private readonly ICallGateSubscriber<List<string>> getList =
-        plugin.GetIpcSubscriber<List<string>>("BossMod.Presets.GetList");
+        plugin.GetIpcSubscriber<List<string>>("BossMod.Presets.ListAll");
 
     public bool IsAvailable
     {
