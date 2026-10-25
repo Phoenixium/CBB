@@ -1,20 +1,20 @@
 [
   {
     "Author": "Phoenixium",
-    "Name": "CBB",
+    "Name": "Botja",
     "InternalName": "Botja",
-    "AssemblyVersion": "0.0.5",
-    "Punchline" : "FATE and CE tool for Bozja and Zadnor",
-    "Description" : "Automate fate travel, CE joining, opening chests and fragements, turn in Field notes and MORE!",
+    "AssemblyVersion": "0.0.5.0",
+    "Description": "Automate fate travel, CE joining, opening chests and fragements, turn in Field notes and MORE!",
     "ApplicableVersion": "any",
-    "DalamudApiLevel": 15,
     "RepoUrl": "https://github.com/Phoenixium/CBB",
-    "DownloadLinkInstall": "https://github.com/Phoenixium/CBB/releases/download/0.0.5/Botja.zip",
-    "DownloadLinkUpdate": "https://github.com/Phoenixium/CBB/releases/download/0.0.5/Botja.zip",
+    "DalamudApiLevel": 15,
     "LoadRequiredState": 0,
     "LoadSync": false,
     "CanUnloadAsync": false,
     "LoadPriority": 0,
-    "AcceptsFeedback": true
+    "Punchline": "FATE and CE tool for Bozja and Zadnor",
+    "AcceptsFeedback": true,
+    "DownloadLinkInstall": "https://github.com/Phoenixium/CBB/releases/download/0.0.5/Botja.zip",
+    "DownloadLinkUpdate": "https://github.com/Phoenixium/CBB/releases/download/0.0.5/Botja.zip"
   }
 ]
