@@ -61,6 +61,59 @@
         }
       }
     },
+    "mob_farm": {
+      "label": "Mob Farm",
+      "fields": {
+        "mob_base_ids": {
+          "label": "Mob templates to farm"
+        },
+        "should_handle_targeting": {
+          "label": "Automatically target mobs"
+        },
+        "force_target_central_enemy": {
+          "label": "Prefer the mob nearest the pack center"
+        },
+        "max_mob_distance_yalms": {
+          "label": "Maximum mob distance"
+        },
+        "spots": {
+          "label": "Farm spots"
+        },
+        "claimed_spot_seconds": {
+          "label": "Seconds before a contested spot is abandoned"
+        },
+        "claimed_player_radius_yalms": {
+          "label": "Other-player spot radius"
+        },
+        "minimum_mobs_to_start_loop": {
+          "label": "Free mobs required to start gathering"
+        },
+        "minimum_mobs_to_start_fight": {
+          "label": "Engaged mobs required to start fighting"
+        },
+        "stacking_timeout_seconds": {
+          "label": "Gathering timeout before stacking"
+        },
+        "use_ranged_pull": {
+          "label": "Use a tank ranged pull"
+        },
+        "use_provoke": {
+          "label": "Use Provoke as a tank pull"
+        },
+        "use_gap_closer": {
+          "label": "Use a tank gap closer"
+        },
+        "return_to_start_in_waiting_phase": {
+          "label": "Return to the farm spot after fighting"
+        },
+        "min_distance_to_return_home_yalms": {
+          "label": "Minimum distance before returning"
+        },
+        "render_debug_lines": {
+          "label": "Draw farm debug lines"
+        }
+      }
+    },
     "blacklist": {
       "label": "Ignore list",
       "fields": {
@@ -95,6 +148,9 @@
       "stop_auto_mode": "Stop Auto Mode",
       "start_auto_mode": "Start Auto Mode",
       "auto_mode_tooltip": "Continuously travel to and fight the next FATE, joining recruiting CEs first",
+      "start_mob_farm": "Start Mob Farm",
+      "stop_mob_farm": "Stop Mob Farm",
+      "mob_farm_tooltip": "Farm selected nearby Bozja/Zadnor mobs at configured spots",
       "going_to_fate": "Going to FATE: {name}",
       "no_active_fates": "No active FATEs in this area.",
       "table_name": "Name",

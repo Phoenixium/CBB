@@ -129,7 +129,6 @@ public sealed unsafe partial class HostileDetectionService(
                 Facing: battleNpc.Rotation,
                 CurrentHp: battleNpc.CurrentHp,
                 MaxHp: battleNpc.MaxHp,
-                Rank: GetForayRank(battleNpc),
                 AggroType: MobAggroData.Classify(battleNpc.BaseId),
                 FateId: GetFateId(battleNpc)
             ));
@@ -160,18 +159,6 @@ public sealed unsafe partial class HostileDetectionService(
         }
 
         return addresses;
-    }
-
-    private static byte GetForayRank(IBattleNpc battleNpc)
-    {
-        try
-        {
-            return ((BattleChara*)battleNpc.Address)->ForayInfo.Level;
-        }
-        catch
-        {
-            return battleNpc.Level;
-        }
     }
 
     // Native GameObject.FateId (inherited by BattleChara) — the game's own, precise record of which

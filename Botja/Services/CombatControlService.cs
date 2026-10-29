@@ -32,6 +32,8 @@ public sealed unsafe class CombatControlService(
     private bool stateInitialized;
     private bool wasActive;
     private bool manualEnabled;
+    private bool mobFarmEngaged;
+    private CombatActivity? activeCombatActivity;
     private bool backendDiagnosticLogged;
     private uint activeFateId;
     private ushort activeCeEventId;
@@ -50,6 +52,8 @@ public sealed unsafe class CombatControlService(
     // state, for direct "just fight now" control from the UI.
     public bool ManualEnabled => manualEnabled;
 
+    public void SetMobFarmEngaged(bool engaged) => mobFarmEngaged = engaged;
+
     public void StartManualCombat() => manualEnabled = true;
 
     public void StopManualCombat() => manualEnabled = false;
@@ -65,7 +69,7 @@ public sealed unsafe class CombatControlService(
             log.Information("[CombatAI] CombatControl received {Count} backends: {Kinds}", aiBackends.Count(), string.Join(", ", aiBackends.Select(backend => $"{backend.Kind} ({backend.GetType().Name})")));
         }
 
-        if (!autoModeState.IsRunning && !manualEnabled)
+        if (!autoModeState.IsRunning && !manualEnabled && !mobFarmEngaged)
         {
             if (wasActive || combatEnabled || !stateInitialized)
             {
@@ -137,20 +141,23 @@ public sealed unsafe class CombatControlService(
         if (activeCeEventId != 0 && !ceActive)
             activeCeEventId = 0;
 
-        bool shouldFight = manualEnabled || (config.AutoControlEnabled && !traveling && (fateActive || ceActive));
-        if (stateInitialized && shouldFight == combatEnabled)
+        bool shouldFight = manualEnabled || (config.AutoControlEnabled && (mobFarmEngaged || (!traveling && (fateActive || ceActive))));
+        var activity = ceActive ? CombatActivity.CriticalEncounter : fateActive ? CombatActivity.Fate : CombatActivity.MobFarm;
+        bool activityChanged = shouldFight && activeCombatActivity != activity;
+        if (stateInitialized && shouldFight == combatEnabled && !activityChanged)
             return;
 
         stateInitialized = true;
         combatEnabled = shouldFight;
         if (combatEnabled)
         {
-            var activity = ceActive ? CombatActivity.CriticalEncounter : fateActive ? CombatActivity.Fate : CombatActivity.MobFarm;
+            activeCombatActivity = activity;
             log.Debug("[CombatControl] Enabling selected combat AIs (manual={Manual}, fate {FateId}, ce {CeId})", manualEnabled, activeFateId, activeCeEventId);
             EnableSelected(activity);
         }
         else
         {
+            activeCombatActivity = null;
             log.Debug("[CombatControl] Disabling all combat AIs (traveling={Traveling}, fateActive={FateActive}, ceActive={CeActive})", traveling, fateActive, ceActive);
             DisableAll();
         }

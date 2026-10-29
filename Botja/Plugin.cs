@@ -76,8 +76,13 @@ public sealed class Plugin(IDalamudPluginInterface pluginInterface, IPluginLog l
         services.AddSingleton<CeSignupService>();
         services.AddSingleton<BossModProfileService>();
         services.AddSingleton<BossModActiveProfilesService>();
+        services.AddSingleton<MobTemplateChecklistRenderer>();
+        services.AddSingleton<FarmSpotListRenderer>();
         services.AddSingleton<CombatControlService>();
         services.AddSingleton<HostileDetectionService>();
+        services.AddSingleton<MobFarmSpotSession>();
+        services.AddSingleton<MobFarmPullAssist>();
+        services.AddSingleton<MobFarmService>();
         services.AddSingleton<HostileOverlayService>();
         services.AddSingleton<AutoModeService>();
         services.AddSingleton<TranslationLoader>();

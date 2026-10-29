@@ -25,6 +25,8 @@ public interface IPluginConfig
     FollowConfig Follow { get; }
 
     AutoModeConfig AutoMode { get; }
+
+    MobFarmConfig MobFarm { get; }
 }
 
 public sealed class PluginConfig : IPluginConfig, IPluginConfiguration
@@ -47,6 +49,8 @@ public sealed class PluginConfig : IPluginConfig, IPluginConfiguration
 
     public AutoModeConfig AutoMode { get; set; } = new();
 
+    public MobFarmConfig MobFarm { get; set; } = new();
+
     public void HydrateMissingSections()
     {
         Navigation ??= new();
@@ -57,12 +61,15 @@ public sealed class PluginConfig : IPluginConfig, IPluginConfiguration
         HostileDetection ??= new();
         Follow ??= new();
         AutoMode ??= new();
+        MobFarm ??= new();
         ItemInspection.SkipItemIds ??= [];
         Blacklist.FateIds ??= [];
         Blacklist.CeEventIds ??= [];
         Combat.SelectedAis ??= [];
         Combat.SelectedBossModProfiles ??= [];
         Follow.FateIds ??= [];
+        MobFarm.MobBaseIds ??= [];
+        MobFarm.Spots ??= [];
     }
 }
 
@@ -159,6 +166,57 @@ public sealed class AutoModeConfig : IAutoConfig
 
     [Checkbox]
     public bool DoFates { get; set; } = true;
+}
+
+public sealed class MobFarmConfig : IAutoConfig
+{
+    [MobTemplateChecklist]
+    public HashSet<uint> MobBaseIds { get; set; } = [];
+
+    [Checkbox]
+    public bool ShouldHandleTargeting { get; set; } = true;
+
+    [Checkbox]
+    public bool ForceTargetCentralEnemy { get; set; } = true;
+
+    [FloatRange(10f, 200f)]
+    public float MaxMobDistanceYalms { get; set; } = 75f;
+
+    [FarmSpotList]
+    public List<MobFarmSpot> Spots { get; set; } = [];
+
+    [FloatRange(3f, 30f)]
+    public float ClaimedSpotSeconds { get; set; } = 8f;
+
+    [FloatRange(3f, 15f)]
+    public float ClaimedPlayerRadiusYalms { get; set; } = 5f;
+
+    [IntRange(0, 20)]
+    public int MinimumMobsToStartLoop { get; set; } = 0;
+
+    [IntRange(1, 20)]
+    public int MinimumMobsToStartFight { get; set; } = 5;
+
+    [FloatRange(5f, 60f)]
+    public float StackingTimeoutSeconds { get; set; } = 15f;
+
+    [Checkbox]
+    public bool UseRangedPull { get; set; } = true;
+
+    [Checkbox]
+    public bool UseProvoke { get; set; }
+
+    [Checkbox]
+    public bool UseGapCloser { get; set; }
+
+    [Checkbox]
+    public bool ReturnToStartInWaitingPhase { get; set; }
+
+    [FloatRange(10f, 1000f)]
+    public float MinDistanceToReturnHomeYalms { get; set; } = 200f;
+
+    [Checkbox]
+    public bool RenderDebugLines { get; set; }
 }
 
 public sealed class HostileDetectionConfig : IAutoConfig

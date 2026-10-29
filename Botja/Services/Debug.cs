@@ -670,7 +670,6 @@ public sealed unsafe partial class HostileDetectionService
         float Facing,
         uint CurrentHp,
         uint MaxHp,
-        byte Rank,
         AggroType AggroType,
         uint FateId
     );

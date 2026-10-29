@@ -23,6 +23,7 @@ public partial class FateListWindow(
     CeSignupService ceSignup,
     CombatControlService combatControl,
     AutoModeService autoMode,
+    MobFarmService mobFarm,
     HostileDetectionService hostileDetection
 ) : OcelotWindow("Cant be Bozja'ed"), IOnLoad, IOnTerritoryChanged, IMainWindow
 {
@@ -112,6 +113,24 @@ public partial class FateListWindow(
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Force-enable the selected combat AI right now, regardless of Auto Mode/FATE/CE state");
+
+        if (ImGui.Button(mobFarm.IsRunning ? "Stop Mob Farm" : "Start Mob Farm"))
+        {
+            if (mobFarm.IsRunning)
+                mobFarm.Stop();
+            else
+                mobFarm.Start();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Farm selected nearby Bozja/Zadnor mobs at configured spots");
+        ImGui.TextUnformatted($"Mob Farm: {mobFarm.Status}");
+        if (mobFarm.IsRunning)
+        {
+            ImGui.TextUnformatted($"Phase: {mobFarm.Phase} | Spot: {mobFarm.CurrentSpotName}");
+            ImGui.TextUnformatted($"Selected templates: {mobFarm.SelectedMobCount} | Free: {mobFarm.FreeMobCount} | Attacking you: {mobFarm.EngagedMobCount} | Contested: {mobFarm.ContestedMobCount}");
+            if (!string.IsNullOrEmpty(mobFarm.CurrentTargetName))
+                ImGui.TextUnformatted($"Current target: {mobFarm.CurrentTargetName}");
+        }
 
         if (ImGui.Button(autoMode.IsRunning ? "Stop Auto Mode" : "Start Auto Mode"))
         {
@@ -234,12 +253,11 @@ public partial class FateListWindow(
         if (!ImGui.CollapsingHeader($"Nearby Hostile NPCs ({hostiles.Count})"))
             return;
 
-        if (!ImGui.BeginTable("hostiles", 8, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg))
+        if (!ImGui.BeginTable("hostiles", 7, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg))
             return;
 
         ImGui.TableSetupColumn("Name");
         ImGui.TableSetupColumn("Distance");
-        ImGui.TableSetupColumn("Rank");
         ImGui.TableSetupColumn("HP");
         ImGui.TableSetupColumn("Position");
         ImGui.TableSetupColumn("DataId");
@@ -255,16 +273,14 @@ public partial class FateListWindow(
             ImGui.TableSetColumnIndex(1);
             ImGui.TextUnformatted($"{hostile.DistanceYalms:F1}y");
             ImGui.TableSetColumnIndex(2);
-            ImGui.TextUnformatted(hostile.Rank.ToString());
-            ImGui.TableSetColumnIndex(3);
             ImGui.TextUnformatted($"{hostile.CurrentHp}/{hostile.MaxHp}");
-            ImGui.TableSetColumnIndex(4);
+            ImGui.TableSetColumnIndex(3);
             ImGui.TextUnformatted($"({hostile.Position.X:F0}, {hostile.Position.Z:F0})");
-            ImGui.TableSetColumnIndex(5);
+            ImGui.TableSetColumnIndex(4);
             ImGui.TextUnformatted(hostile.DataId.ToString());
-            ImGui.TableSetColumnIndex(6);
+            ImGui.TableSetColumnIndex(5);
             ImGui.TextUnformatted(hostile.AggroType.ToString());
-            ImGui.TableSetColumnIndex(7);
+            ImGui.TableSetColumnIndex(6);
             ImGui.TextUnformatted(hostile.FateId == 0 ? "-" : hostile.FateId.ToString());
         }
 
